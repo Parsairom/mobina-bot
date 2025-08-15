@@ -1,0 +1,8 @@
+BOT_TOKEN=your_bot_token_here
+TELEGRAM_WEBHOOK_SECRET=a_random_string_you_make_up
+ALLOWED_USER_IDS=111111111,222222222
+USER_NAMES={"111111111":"Alice","222222222":"Bob"}
+
+# Optional: only needed for the AI-powered features (photo recognition,
+# relationship narrator, gift suggestions). Leave unset to disable them.
+GEMINI_API_KEY=

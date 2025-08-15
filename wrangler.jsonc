@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mobina-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // ALLOWED_USER_IDS and USER_NAMES hold real Telegram user IDs and names,
+  // so they're set as secrets (`wrangler secret put ALLOWED_USER_IDS` /
+  // `wrangler secret put USER_NAMES`) instead of being committed here.
+  // BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET are secrets for the same reason.
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mobina-bot-db",
+      "database_id": "4bbc1638-0e2d-4349-a6d3-92f409a25d7c",
+      "migrations_dir": "./migrations"
+    }
+  ],
+
+  // Cron triggers always run in UTC (Iran is UTC+3:30, no DST).
+  // 05:30 UTC = 09:00 Tehran (anniversaries, on-this-day, monthly recap, secret message delivery, Saturday challenge).
+  // 16:30 UTC = 20:00 Tehran (daily mood check-in, Friday weekly mood recap).
+  "triggers": {
+    "crons": ["30 5 * * *", "30 16 * * *"]
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

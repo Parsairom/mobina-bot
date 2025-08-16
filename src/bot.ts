@@ -20,6 +20,7 @@ import { formatMemoryCaption } from "./format";
 import {
   BATTLESHIP_SIZE,
   C4_COLS,
+  C4_ROWS,
   checkConnectFourWinner,
   checkTicTacToeWinner,
   dropConnectFour,
@@ -163,6 +164,31 @@ async function broadcastWithKeyboard(api: Api, env: Env, text: string, keyboard:
   }
 }
 
+// Only one ongoing 2-player game session may run at a time, so starting a
+// new one doesn't collide with a game already in progress.
+const GAME_LABELS: Record<string, string> = {
+  reaction: "⚡ بازی واکنش",
+  ttt: "❌⭕ دوز",
+  c4: "🔴🟡 چهار در ردیف",
+  battleship: "🚢 کشتی‌جنگی",
+  word_chain: "🔤 زنجیره‌ی کلمات",
+  hangman: "🎪 دار",
+  truth_dare: "🎲 جرأت یا حقیقت",
+};
+
+async function tryStartGame(env: Env, gameType: string): Promise<boolean> {
+  const active = await db.getActiveGame(env.DB);
+  if (active) return false;
+  await db.setActiveGame(env.DB, gameType);
+  return true;
+}
+
+async function gameLockedMessage(env: Env): Promise<string> {
+  const active = await db.getActiveGame(env.DB);
+  const label = active ? (GAME_LABELS[active] ?? active) : "یه بازی";
+  return `یه بازی دیگه (${label}) الان در جریانه — اول تمومش کنید، یا از «🎮 بازی‌ها» بزنید «🏳️ لغو بازی فعلی».`;
+}
+
 const RPS_LABELS: Record<string, string> = { rock: "✊ سنگ", paper: "✋ کاغذ", scissors: "✌️ قیچی" };
 const RPS_BEATS: Record<string, string> = { rock: "scissors", paper: "rock", scissors: "paper" };
 
@@ -186,14 +212,14 @@ function renderTttBoard(board: string): InlineKeyboard {
 }
 
 function renderC4Board(board: string): InlineKeyboard {
+  // Every visible cell drops into its own column (not just a separate number
+  // row above the board) — tapping the board itself is what people expect.
   const kb = new InlineKeyboard();
-  for (let c = 0; c < C4_COLS; c++) kb.text(`${toPersianDigits(c + 1)}`, `c4:drop:${c}`);
-  kb.row();
-
-  for (let r = 0; r < 6; r++) {
+  for (let r = 0; r < C4_ROWS; r++) {
     for (let c = 0; c < C4_COLS; c++) {
       const cell = board[r * C4_COLS + c];
-      kb.text(cell === "_" ? "⚪" : cell === "R" ? "🔴" : "🟡", "c4:noop");
+      const label = cell === "_" ? "⚪" : cell === "R" ? "🔴" : "🟡";
+      kb.text(label, `c4:drop:${c}`);
     }
     kb.row();
   }
@@ -400,6 +426,40 @@ async function sendStats(ctx: Context, env: Env): Promise<void> {
   await ctx.reply(lines.join("\n"), { reply_markup: mainMenuKeyboard() });
 }
 
+// Strips lone (unpaired) UTF-16 surrogates. Some mobile keyboards/paste
+// sources can leave these behind, and Telegram's API hard-rejects the whole
+// sendMessage call with "strings must be encoded in UTF-8" if a relayed
+// message contains one — which, unhandled, previously jammed the entire
+// webhook queue. Sanitizing at the point text enters the bot prevents that
+// for every downstream store/relay/reply of that text.
+function sanitizeForTelegram(text: string): string {
+  return text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
+}
+
+// Word-chain words are often typed with trailing emoji/punctuation ("کون😂").
+// Using the raw last character as the "next word must start with" rule turns
+// the game unwinnable the moment that happens (an emoji is never a valid
+// first letter), which silently hijacks every future message from whoever's
+// turn it is — including unrelated things like an add-memory caption. Strip
+// non-letter characters from both ends before picking the letter to match.
+function meaningfulWordChainText(word: string): string {
+  return word.trim().replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "");
+}
+
+function wordChainLastLetter(word: string): string {
+  const trimmed = meaningfulWordChainText(word);
+  return trimmed ? trimmed[trimmed.length - 1] : "";
+}
+
+// Splits a bulk-pasted block of text into individual prompts — one per
+// line, stripping any leading numbering/bullets ("1.", "2)", "-", "•").
+function splitBulkLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim().replace(/^(\d+[.)]|[-•*])\s*/, "").trim())
+    .filter((line) => line.length > 0);
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -566,6 +626,18 @@ h1{color:#b23a6b}
   });
 }
 
+async function sendTdTurnPrompt(api: Api, env: Env, turnUserId: number): Promise<void> {
+  const name = getUserName(env, turnUserId);
+  const keyboard = new InlineKeyboard()
+    .text("❓ حقیقت", "td:choose:truth")
+    .text("🎯 جرأت", "td:choose:dare")
+    .row()
+    .text("✍️ خودم می‌نویسم", "td:custom")
+    .row()
+    .text("🏳️ پایان بازی", "td:end");
+  await broadcastWithKeyboard(api, env, `نوبت ${name}ه! چی می‌خوای؟`, keyboard);
+}
+
 async function sendMemoryQuiz(ctx: Context, env: Env): Promise<void> {
   const [memories, anniversaries] = await Promise.all([db.getAllMemories(env.DB), db.listAnniversaries(env.DB)]);
 
@@ -605,15 +677,28 @@ async function sendMemoryQuiz(ctx: Context, env: Env): Promise<void> {
 
 // ---------- blackjack ----------
 
+// Both partners get their own hand dealt at once (vs the dealer), so it plays
+// out as a running points rivalry between the two rather than a solo game.
 async function startBlackjackRound(ctx: Context, env: Env): Promise<void> {
-  const userId = ctx.from!.id;
+  for (const userId of parseAllowedIds(env)) {
+    const existing = await db.getBlackjackGame(env.DB, userId);
+    if (existing && existing.status === "active") continue; // don't clobber their in-progress hand
+    await dealBlackjackHand(ctx.api, env, userId);
+  }
+}
+
+async function dealBlackjackHand(api: Api, env: Env, userId: number): Promise<void> {
   const points = await db.getBlackjackPoints(env.DB, userId);
   const bet = 50;
 
   if (points < bet) {
-    await ctx.reply(`امتیازت کافی نیست (${toPersianDigits(points)} امتیاز داری) 😅`, {
-      reply_markup: mainMenuKeyboard(),
-    });
+    try {
+      await api.sendMessage(userId, `امتیازت کافی نیست (${toPersianDigits(points)} امتیاز داری) 😅`, {
+        reply_markup: mainMenuKeyboard(),
+      });
+    } catch (err) {
+      console.error("blackjack: failed to notify low points to", userId, err);
+    }
     return;
   }
 
@@ -624,21 +709,26 @@ async function startBlackjackRound(ctx: Context, env: Env): Promise<void> {
 
   const playerValue = handValue(playerCards);
   if (playerValue === 21) {
-    await resolveBlackjack(ctx, env, userId, playerCards, dealerCards, "win");
+    await resolveBlackjack(api, env, userId, playerCards, dealerCards, "win");
     return;
   }
 
   const keyboard = new InlineKeyboard().text("🃏 بکش", "bj:hit").text("✋ وایسا", "bj:stand");
-  await ctx.reply(
-    `🃏 بلک‌جک (شرط: ${toPersianDigits(bet)} امتیاز، موجودی: ${toPersianDigits(points)})\n\n` +
-      `کارت‌های تو: ${formatHand(playerCards)} (${toPersianDigits(playerValue)})\n` +
-      `کارت باز دیلر: ${dealerCards[0]}`,
-    { reply_markup: keyboard }
-  );
+  try {
+    await api.sendMessage(
+      userId,
+      `🃏 بلک‌جک شروع شد! (شرط: ${toPersianDigits(bet)} امتیاز، موجودی: ${toPersianDigits(points)})\n\n` +
+        `کارت‌های تو: ${formatHand(playerCards)} (${toPersianDigits(playerValue)})\n` +
+        `کارت باز دیلر: ${dealerCards[0]}`,
+      { reply_markup: keyboard }
+    );
+  } catch (err) {
+    console.error("blackjack: failed to deal to", userId, err);
+  }
 }
 
 async function resolveBlackjack(
-  ctx: Context,
+  api: Api,
   env: Env,
   userId: number,
   playerCards: string[],
@@ -661,12 +751,24 @@ async function resolveBlackjack(
         ? `😢 باختی! -${toPersianDigits(bet)} امتیاز`
         : "🤝 مساوی شد، امتیازی رد و بدل نشد";
 
-  await ctx.reply(
-    `کارت‌های تو: ${formatHand(playerCards)} (${toPersianDigits(handValue(playerCards))})\n` +
-      `کارت‌های دیلر: ${formatHand(dealerCards)} (${toPersianDigits(handValue(dealerCards))})\n\n` +
-      `${resultText}\nموجودی الان: ${toPersianDigits(newPoints)} امتیاز`,
-    { reply_markup: mainMenuKeyboard() }
-  );
+  const other = otherUserId(env, userId);
+  let standingsLine = `موجودی الان: ${toPersianDigits(newPoints)} امتیاز`;
+  if (other) {
+    const otherPoints = await db.getBlackjackPoints(env.DB, other);
+    standingsLine = `📊 امتیازها: ${getUserName(env, userId)} ${toPersianDigits(newPoints)} | ${getUserName(env, other)} ${toPersianDigits(otherPoints)}`;
+  }
+
+  try {
+    await api.sendMessage(
+      userId,
+      `کارت‌های تو: ${formatHand(playerCards)} (${toPersianDigits(handValue(playerCards))})\n` +
+        `کارت‌های دیلر: ${formatHand(dealerCards)} (${toPersianDigits(handValue(dealerCards))})\n\n` +
+        `${resultText}\n${standingsLine}`,
+      { reply_markup: mainMenuKeyboard() }
+    );
+  } catch (err) {
+    console.error("blackjack: failed to send result to", userId, err);
+  }
 }
 
 // ---------- hangman ----------
@@ -674,21 +776,34 @@ async function resolveBlackjack(
 const PERSIAN_ALPHABET = "ابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی".split("");
 const HANGMAN_STAGES = ["🙂", "😐", "😟", "😨", "😰", "😵", "💀"];
 
+// Longer/harder words are more forgiving: they allow more wrong guesses
+// instead of the same flat limit for every word.
+function hangmanMaxWrong(word: string): number {
+  return Math.max(6, 4 + Math.ceil(word.length / 2));
+}
+
 function renderHangmanText(word: string, guessed: string, wrong: number, category: string): string {
   const display = word
     .split("")
     .map((ch) => (guessed.includes(ch) ? ch : "_"))
     .join(" ");
-  const stage = HANGMAN_STAGES[Math.min(wrong, HANGMAN_STAGES.length - 1)];
-  return `🎪 دار (${category})\n\n${display}\n\n${stage} اشتباه: ${toPersianDigits(wrong)}/۶`;
+  const maxWrong = hangmanMaxWrong(word);
+  const stageIndex = Math.min(
+    Math.floor((wrong / maxWrong) * (HANGMAN_STAGES.length - 1)),
+    HANGMAN_STAGES.length - 1
+  );
+  const stage = HANGMAN_STAGES[stageIndex];
+  return `🎪 دار (${category})\n\n${display}\n\n${stage} اشتباه: ${toPersianDigits(wrong)}/${toPersianDigits(maxWrong)}`;
 }
 
-function renderHangmanKeyboard(guessed: string): InlineKeyboard {
+function renderHangmanKeyboard(word: string, guessed: string): InlineKeyboard {
   const kb = new InlineKeyboard();
   let count = 0;
   for (const letter of PERSIAN_ALPHABET) {
-    if (guessed.includes(letter)) continue;
-    kb.text(letter, `hangman:guess:${letter}`);
+    const isGuessed = guessed.includes(letter);
+    const isWrong = isGuessed && !word.includes(letter);
+    const label = isWrong ? `${letter}̶` : letter;
+    kb.text(label, isGuessed ? "hangman:noop" : `hangman:guess:${letter}`);
     count++;
     if (count % 6 === 0) kb.row();
   }
@@ -801,6 +916,27 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
   const bot = new Bot(env.BOT_TOKEN);
   const allowed = new Set(parseAllowedIds(env));
 
+  bot.catch((err) => {
+    console.error("bot handler error:", err.message, err.error);
+    const e = err.error as { message?: string; stack?: string; method?: string; payload?: unknown };
+    const detail =
+      err.error instanceof Error
+        ? `${e.message}\nmethod=${e.method}\npayload=${JSON.stringify(e.payload)}\n${e.stack}`
+        : String(err.error);
+    cfCtx.waitUntil(
+      env.DB.prepare("INSERT INTO debug_log (info, created_at) VALUES (?, ?)")
+        .bind(`BOT_CATCH: ${detail}`.slice(0, 1900), new Date().toISOString())
+        .run()
+        .catch((dbErr) => console.error("debug_log insert failed", dbErr))
+    );
+    const chatId = err.ctx.chat?.id;
+    if (chatId) {
+      err.ctx.api.sendMessage(chatId, "یه مشکلی پیش اومد، دوباره امتحان کن 🙏").catch((sendErr) => {
+        console.error("failed to notify user of error:", sendErr);
+      });
+    }
+  });
+
   bot.use(async (ctx, next) => {
     // Fail closed: if ALLOWED_USER_IDS isn't configured, deny everyone rather
     // than silently opening the bot up to any Telegram user.
@@ -870,6 +1006,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
         .text("🔙 بازگشت به منو", "menu:main");
       await ctx.reply("اینجا جای رازای عاشقونتونه 💌", { reply_markup: keyboard });
     } else if (action === "games") {
+      const active = await db.getActiveGame(env.DB);
       const keyboard = new InlineKeyboard()
         .text("🎮 سوال زوجی", "menu:couple_question")
         .text("🎲 جرأت یا حقیقت", "menu:truth_dare")
@@ -896,8 +1033,16 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
         .text("🎪 دار (حدس کلمه)", "menu:hangman")
         .text("📆 چالش روزانه", "menu:daily_challenge")
         .row()
-        .text("🔙 بازگشت به منو", "menu:main");
-      await ctx.reply("کدوم بازی رو بازی کنیم؟ 🎮", { reply_markup: keyboard });
+        .text("📝 سوالات جرأت‌حقیقت من", "menu:td_manage")
+        .row();
+      if (active) {
+        keyboard.text(`🏳️ لغو بازی فعلی (${GAME_LABELS[active] ?? active})`, "game:forcecancel").row();
+      }
+      keyboard.text("🔙 بازگشت به منو", "menu:main");
+      const intro = active
+        ? `یه بازی (${GAME_LABELS[active] ?? active}) الان در جریانه.\nکدوم بازی رو بازی کنیم؟ 🎮`
+        : "کدوم بازی رو بازی کنیم؟ 🎮";
+      await ctx.reply(intro, { reply_markup: keyboard });
     } else if (action === "couple_question") {
       const question = await db.pickUnusedPrompt(env.DB, "couple_question", COUPLE_QUESTIONS);
       await broadcastToBoth(
@@ -912,12 +1057,31 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       const challenge = await db.pickUnusedPrompt(env.DB, "weekly_challenge", WEEKLY_CHALLENGES);
       await broadcastToBoth(ctx.api, env, `🎯 چالش این هفته:\n\n${challenge}`);
     } else if (action === "truth_dare") {
+      if (!(await tryStartGame(env, "truth_dare"))) {
+        await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
+      } else {
+        const keyboard = new InlineKeyboard()
+          .text("😇 معمولی", "td:spice:normal")
+          .text("🔥 خودمونی‌تر (۱۸+)", "td:spice:spicy")
+          .row()
+          .text("🏳️ بی‌خیال", "td:cancel");
+        await ctx.reply("کدوم حالت باشه؟", { reply_markup: keyboard });
+      }
+    } else if (action === "td_manage") {
       const keyboard = new InlineKeyboard()
-        .text("😇 معمولی", "td:spice:normal")
-        .text("🔥 خودمونی‌تر (۱۸+)", "td:spice:spicy")
+        .text("➕ حقیقت معمولی", "tdcustom:add:truth:normal")
+        .text("➕ حقیقت ۱۸+", "tdcustom:add:truth:spicy")
+        .row()
+        .text("➕ جرأت معمولی", "tdcustom:add:dare:normal")
+        .text("➕ جرأت ۱۸+", "tdcustom:add:dare:spicy")
+        .row()
+        .text("📋 لیست و حذف", "tdcustom:list")
         .row()
         .text("🔙 بازگشت به بازی‌ها", "menu:games");
-      await ctx.reply("کدوم حالت باشه؟", { reply_markup: keyboard });
+      await ctx.reply(
+        "سوالات و جرأت‌های خودتون رو اینجا اضافه کنید — موقع بازی جرأت‌حقیقت قاطی سوالات بات میان 📝",
+        { reply_markup: keyboard }
+      );
     } else if (action === "this_or_that") {
       const pick = await db.pickUnusedPrompt(env.DB, "this_or_that", THIS_OR_THAT);
       await broadcastToBoth(ctx.api, env, `⚖️ این یا اون؟\n\n${pick}\n\nهرچی جواب بدید رو میدم به اون یکی 💜`);
@@ -934,12 +1098,13 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       const keyboard = new InlineKeyboard()
         .text("✊ سنگ", "rps:move:rock")
         .text("✋ کاغذ", "rps:move:paper")
-        .text("✌️ قیچی", "rps:move:scissors")
-        .row()
-        .text("🔙 بازگشت به بازی‌ها", "menu:games");
-      await ctx.reply("سنگ کاغذ قیچی! حرکتت رو انتخاب کن، وقتی هر دوتون انتخاب کردین نتیجه رو می‌گم 🎲", {
-        reply_markup: keyboard,
-      });
+        .text("✌️ قیچی", "rps:move:scissors");
+      await broadcastWithKeyboard(
+        ctx.api,
+        env,
+        "سنگ کاغذ قیچی! حرکتت رو انتخاب کن، وقتی هر دوتون انتخاب کردین نتیجه رو می‌گم 🎲",
+        keyboard
+      );
     } else if (action === "ttal") {
       await db.setPending(env.DB, ctx.from!.id, "ttal_create", "await_s1", {});
       await ctx.reply("سه‌تا جمله بنویس، دوتاش راسته یکیش دروغ. اول جمله‌ی اول رو بفرست:", {
@@ -948,29 +1113,43 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     } else if (action === "memory_quiz") {
       await sendMemoryQuiz(ctx, env);
     } else if (action === "reaction") {
-      await db.startReactionRound(env.DB);
-      await broadcastToBoth(ctx.api, env, "⚡ آماده باش... هر وقت دکمه ظاهر شد، سریع‌تر از اون یکی بزنش!");
+      if (!(await tryStartGame(env, "reaction"))) {
+        await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
+      } else {
+        await db.startReactionRound(env.DB);
+        const waitingKeyboard = new InlineKeyboard().text("⏳ هنوز نه...", "reaction:early");
+        await broadcastWithKeyboard(
+          ctx.api,
+          env,
+          "⚡ آماده باش... فقط وقتی دکمه‌ی سبز اومد بزن! زودتر بزنی می‌بازی 😏",
+          waitingKeyboard
+        );
 
-      const delayMs = 2000 + Math.floor(Math.random() * 4000);
-      const api = ctx.api;
-      cfCtx.waitUntil(
-        (async () => {
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-          await db.activateReactionRound(env.DB);
-          const keyboard = new InlineKeyboard().text("🎯 بزن!", "reaction:tap");
-          for (const id of parseAllowedIds(env)) {
-            try {
-              await api.sendMessage(id, "🎯 بزن بزن بزن!", { reply_markup: keyboard });
-            } catch (err) {
-              console.error("reaction: failed to send GO message", err);
+        const delayMs = 1500 + Math.floor(Math.random() * 4500);
+        const api = ctx.api;
+        cfCtx.waitUntil(
+          (async () => {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            const round = await db.getReactionRound(env.DB);
+            if (!round || round.status !== "waiting") return; // someone already jumped the gun
+            await db.activateReactionRound(env.DB);
+            const keyboard = new InlineKeyboard().text("🎯 بزن!", "reaction:tap");
+            for (const id of parseAllowedIds(env)) {
+              try {
+                await api.sendMessage(id, "🎯 بزن بزن بزن!", { reply_markup: keyboard });
+              } catch (err) {
+                console.error("reaction: failed to send GO message", err);
+              }
             }
-          }
-        })()
-      );
+          })()
+        );
+      }
     } else if (action === "ttt") {
       const other = otherUserId(env, ctx.from!.id);
       if (!other) {
         await ctx.reply("این بازی نیاز به هر دو آیدی مجاز داره.", { reply_markup: mainMenuKeyboard() });
+      } else if (!(await tryStartGame(env, "ttt"))) {
+        await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
       } else {
         await db.startTttGame(env.DB, ctx.from!.id, other);
         await broadcastWithKeyboard(
@@ -984,6 +1163,8 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       const other = otherUserId(env, ctx.from!.id);
       if (!other) {
         await ctx.reply("این بازی نیاز به هر دو آیدی مجاز داره.", { reply_markup: mainMenuKeyboard() });
+      } else if (!(await tryStartGame(env, "c4"))) {
+        await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
       } else {
         await db.startC4Game(env.DB, ctx.from!.id, other);
         await broadcastWithKeyboard(
@@ -997,16 +1178,20 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       const other = otherUserId(env, ctx.from!.id);
       if (!other) {
         await ctx.reply("این بازی نیاز به هر دو آیدی مجاز داره.", { reply_markup: mainMenuKeyboard() });
+      } else if (!(await tryStartGame(env, "battleship"))) {
+        await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
       } else {
         const boardA = placeShipsRandomly();
         const boardB = placeShipsRandomly();
         await db.startBattleshipGame(env.DB, ctx.from!.id, other, boardA, boardB);
         const emptyHits = ".".repeat(BATTLESHIP_SIZE * BATTLESHIP_SIZE);
         await ctx.reply(`🚢 کشتی‌جنگی شروع شد! نوبت توئه، بزن رو تخته‌ی ${getUserName(env, other)}:`, {
-          reply_markup: renderBattleshipBoard(emptyHits, "bship:fire:a"),
+          reply_markup: renderBattleshipBoard(emptyHits, "bship:fire:b"),
         });
         try {
-          await ctx.api.sendMessage(other, `🚢 کشتی‌جنگی شروع شد! اول نوبت ${name}ه، منتظر بمون ⏳`);
+          await ctx.api.sendMessage(other, `🚢 کشتی‌جنگی شروع شد! اول نوبت ${name}ه، منتظر بمون ⏳`, {
+            reply_markup: renderBattleshipBoard(emptyHits, "bship:fire:a"),
+          });
         } catch (err) {
           console.error("battleship: failed to notify other player", err);
         }
@@ -1014,16 +1199,23 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     } else if (action === "blackjack") {
       await startBlackjackRound(ctx, env);
     } else if (action === "word_chain") {
-      await db.setPending(env.DB, ctx.from!.id, "word_chain_start", "await_word", {});
-      await ctx.reply("یه کلمه بگو تا زنجیره شروع بشه، اون یکی باید با حرف آخرش یه کلمه‌ی جدید بگه:", {
-        reply_markup: cancelKeyboard(),
-      });
+      if (!(await tryStartGame(env, "word_chain"))) {
+        await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
+      } else {
+        await db.setPending(env.DB, ctx.from!.id, "word_chain_start", "await_word", {});
+        await ctx.reply("یه کلمه بگو تا زنجیره شروع بشه، اون یکی باید با حرف آخرش یه کلمه‌ی جدید بگه:", {
+          reply_markup: cancelKeyboard(),
+        });
+      }
     } else if (action === "hangman") {
-      const keyboard = new InlineKeyboard();
-      const categories = Object.keys(HANGMAN_CATEGORIES);
-      for (const cat of categories) keyboard.text(cat, `hangman:cat:${categories.indexOf(cat)}`).row();
-      keyboard.text("🔙 بازگشت به بازی‌ها", "menu:games");
-      await ctx.reply("کدوم دسته‌بندی؟", { reply_markup: keyboard });
+      if (!(await tryStartGame(env, "hangman"))) {
+        await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
+      } else {
+        const keyboard = new InlineKeyboard();
+        const categories = Object.keys(HANGMAN_CATEGORIES);
+        for (const cat of categories) keyboard.text(cat, `hangman:cat:${categories.indexOf(cat)}`).row();
+        await ctx.reply("کدوم دسته‌بندی؟", { reply_markup: keyboard });
+      }
     } else if (action === "daily_challenge") {
       await sendDailyChallengeStatus(ctx, env);
     } else if (action === "savings") {
@@ -1214,6 +1406,25 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
 
   // ---------- speed tap / reaction game ----------
 
+  bot.callbackQuery(/^reaction:early$/, async (ctx) => {
+    const round = await db.getReactionRound(env.DB);
+    if (!round || round.status !== "waiting") {
+      await ctx.answerCallbackQuery({ text: "این دوره تموم شده." });
+      return;
+    }
+    await db.finishReactionRound(env.DB);
+    await db.clearActiveGame(env.DB);
+    await ctx.answerCallbackQuery({ text: "زود بودی! 😅" });
+
+    const other = otherUserId(env, ctx.from.id);
+    const otherName = other ? getUserName(env, other) : "اون یکی";
+    await broadcastToBoth(
+      ctx.api,
+      env,
+      `😅 ${getUserName(env, ctx.from.id)} زودتر از موعد زد و باخت! ${otherName} برد 🏆`
+    );
+  });
+
   bot.callbackQuery(/^reaction:tap$/, async (ctx) => {
     const round = await db.getReactionRound(env.DB);
     if (!round || round.status !== "active") {
@@ -1221,14 +1432,26 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       return;
     }
     await db.finishReactionRound(env.DB);
+    await db.clearActiveGame(env.DB);
     await ctx.answerCallbackQuery({ text: "🏆 تو بردی!" });
 
     const goAt = round.go_at ? new Date(round.go_at).getTime() : Date.now();
     const reactionMs = Date.now() - goAt;
+
+    const prevBest = await db.getReactionRecord(env.DB, ctx.from.id);
+    let recordNote = "";
+    if (prevBest === null) {
+      recordNote = " 🆕 اولین رکوردت!";
+      await db.setReactionRecord(env.DB, ctx.from.id, reactionMs);
+    } else if (reactionMs < prevBest) {
+      recordNote = ` 🥇 رکورد جدید! (رکورد قبلی: ${toPersianDigits(prevBest)}ms)`;
+      await db.setReactionRecord(env.DB, ctx.from.id, reactionMs);
+    }
+
     await broadcastToBoth(
       ctx.api,
       env,
-      `⚡ ${getUserName(env, ctx.from.id)} برد! (${toPersianDigits(reactionMs)} میلی‌ثانیه) 🏆`
+      `⚡ ${getUserName(env, ctx.from.id)} برد! (${toPersianDigits(reactionMs)} میلی‌ثانیه)${recordNote} 🏆`
     );
   });
 
@@ -1257,6 +1480,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
 
     if (winner) {
       await db.updateTttGame(env.DB, newBoard, 0, winner === "draw" ? "draw" : "finished");
+      await db.clearActiveGame(env.DB);
       let resultText: string;
       if (winner === "draw") {
         resultText = "🤝 مساوی شد!";
@@ -1283,6 +1507,10 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     await ctx.answerCallbackQuery();
     const game = await db.getTttGame(env.DB);
     if (!game) return;
+    if (!(await tryStartGame(env, "ttt"))) {
+      await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
+      return;
+    }
     await db.startTttGame(env.DB, game.player_o, game.player_x);
     await broadcastWithKeyboard(
       ctx.api,
@@ -1293,10 +1521,6 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
   });
 
   // ---------- connect four ----------
-
-  bot.callbackQuery(/^c4:noop$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-  });
 
   bot.callbackQuery(/^c4:drop:(\d)$/, async (ctx) => {
     const col = Number(ctx.match[1]);
@@ -1323,6 +1547,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
 
     if (winner || full) {
       await db.updateC4Game(env.DB, dropped.board, 0, "finished");
+      await db.clearActiveGame(env.DB);
       const resultText = winner
         ? `🏆 ${getUserName(env, token === "R" ? game.player_r : game.player_y)} برد!`
         : "🤝 مساوی شد!";
@@ -1340,6 +1565,10 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     await ctx.answerCallbackQuery();
     const game = await db.getC4Game(env.DB);
     if (!game) return;
+    if (!(await tryStartGame(env, "c4"))) {
+      await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
+      return;
+    }
     await db.startC4Game(env.DB, game.player_y, game.player_r);
     await broadcastWithKeyboard(
       ctx.api,
@@ -1388,6 +1617,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     const attackerName = getUserName(env, attacker);
 
     if (sunk) {
+      await db.clearActiveGame(env.DB);
       await broadcastToBoth(ctx.api, env, `🏆 ${attackerName} همه‌ی کشتی‌های ${getUserName(env, defender)} رو غرق کرد و برد!`);
       return;
     }
@@ -1425,7 +1655,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     const value = handValue(playerCards);
     if (value > 21) {
       await db.updateBlackjackGame(env.DB, ctx.from.id, playerCards, dealerCards, deck, "bust");
-      await resolveBlackjack(ctx, env, ctx.from.id, playerCards, dealerCards, "lose");
+      await resolveBlackjack(ctx.api, env, ctx.from.id, playerCards, dealerCards, "lose");
       return;
     }
 
@@ -1456,7 +1686,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     else outcome = "push";
 
     await db.updateBlackjackGame(env.DB, ctx.from.id, playerCards, dealerCards, deck, "finished");
-    await resolveBlackjack(ctx, env, ctx.from.id, playerCards, dealerCards, outcome);
+    await resolveBlackjack(ctx.api, env, ctx.from.id, playerCards, dealerCards, outcome);
   });
 
   // ---------- hangman ----------
@@ -1468,7 +1698,16 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     const words = HANGMAN_CATEGORIES[category];
     const word = words[Math.floor(Math.random() * words.length)];
     await db.startHangmanGame(env.DB, word, category);
-    await broadcastWithKeyboard(ctx.api, env, renderHangmanText(word, "", 0, category), renderHangmanKeyboard(""));
+    await broadcastWithKeyboard(
+      ctx.api,
+      env,
+      renderHangmanText(word, "", 0, category),
+      renderHangmanKeyboard(word, "")
+    );
+  });
+
+  bot.callbackQuery(/^hangman:noop$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
   });
 
   bot.callbackQuery(/^hangman:guess:(.)$/, async (ctx) => {
@@ -1482,11 +1721,14 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     const correct = game.word.includes(letter);
     const newWrong = correct ? game.wrong_count : game.wrong_count + 1;
     const won = game.word.split("").every((ch) => newGuessed.includes(ch));
-    const lost = newWrong >= 6;
+    const lost = newWrong >= hangmanMaxWrong(game.word);
     const status = won ? "won" : lost ? "lost" : "active";
 
     await db.updateHangmanGame(env.DB, newGuessed, newWrong, status);
 
+    if (won || lost) {
+      await db.clearActiveGame(env.DB);
+    }
     if (won) {
       await broadcastToBoth(ctx.api, env, `🎉 بردید! کلمه «${game.word}» بود.`);
       return;
@@ -1500,8 +1742,17 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       ctx.api,
       env,
       renderHangmanText(game.word, newGuessed, newWrong, game.category),
-      renderHangmanKeyboard(newGuessed)
+      renderHangmanKeyboard(game.word, newGuessed)
     );
+  });
+
+  // ---------- word chain ----------
+
+  bot.callbackQuery(/^wordchain:stop$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await db.endWordChain(env.DB);
+    await db.clearActiveGame(env.DB);
+    await broadcastToBoth(ctx.api, env, "🏳️ زنجیره‌ی کلمات تموم شد. هر وقت خواستید از منو دوباره شروع کنید.");
   });
 
   // ---------- daily couple challenge ----------
@@ -1531,40 +1782,126 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     await ctx.reply(lines.join("\n"), { reply_markup: mainMenuKeyboard() });
   });
 
-  // ---------- truth or dare ----------
+  // ---------- truth or dare (turn-based) ----------
+
+  bot.callbackQuery(/^td:cancel$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await db.clearActiveGame(env.DB);
+    await ctx.reply("باشه، بی‌خیالش شدیم.", { reply_markup: mainMenuKeyboard() });
+  });
 
   bot.callbackQuery(/^td:spice:(normal|spicy)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     const spice = ctx.match[1];
-    const keyboard = new InlineKeyboard()
-      .text("❓ حقیقت آسون", `td:pick:${spice}:truth:easy`)
-      .text("❓ حقیقت معمولی", `td:pick:${spice}:truth:normal`)
-      .text("❓ حقیقت سخت", `td:pick:${spice}:truth:hard`)
-      .row()
-      .text("🎯 جرأت آسون", `td:pick:${spice}:dare:easy`)
-      .text("🎯 جرأت معمولی", `td:pick:${spice}:dare:normal`)
-      .text("🎯 جرأت سخت", `td:pick:${spice}:dare:hard`)
-      .row()
-      .text("🔙 بازگشت به منو", "menu:main");
-    await ctx.reply("حقیقت یا جرأت؟ چه سطحی؟", { reply_markup: keyboard });
+    await db.startTdSession(env.DB, spice, ctx.from.id);
+    await sendTdTurnPrompt(ctx.api, env, ctx.from.id);
   });
 
-  bot.callbackQuery(/^td:pick:(normal|spicy):(truth|dare):(easy|normal|hard)$/, async (ctx) => {
+  bot.callbackQuery(/^td:choose:(truth|dare)$/, async (ctx) => {
+    const session = await db.getTdSession(env.DB);
+    if (!session || session.status !== "active") {
+      await ctx.answerCallbackQuery({ text: "بازی‌ای در جریان نیست." });
+      return;
+    }
+    if (ctx.from.id !== session.turn) {
+      await ctx.answerCallbackQuery({ text: "نوبت تو نیست ⏳" });
+      return;
+    }
     await ctx.answerCallbackQuery();
-    const [, spice, type, tier] = ctx.match;
-    const bucket =
-      type === "truth"
-        ? (spice === "spicy" ? TRUTH_SPICY : TRUTH_NORMAL)[tier as Tier]
-        : (spice === "spicy" ? DARE_SPICY : DARE_NORMAL)[tier as Tier];
 
-    const kind = `td_${spice}_${type}_${tier}`;
-    const prompt = await db.pickUnusedPrompt(env.DB, kind, bucket);
+    const type = ctx.match[1] as "truth" | "dare";
+    const spice = session.spice as "normal" | "spicy";
+    const tiers: Tier[] = ["easy", "normal", "hard"];
+    const tier = tiers[Math.floor(Math.random() * tiers.length)];
+    const bucket =
+      type === "truth" ? (spice === "spicy" ? TRUTH_SPICY : TRUTH_NORMAL)[tier] : (spice === "spicy" ? DARE_SPICY : DARE_NORMAL)[tier];
+
+    const customTexts = await db.listCustomTdPromptTexts(env.DB, type, spice);
+    const combined = [...bucket, ...customTexts];
+
+    if (combined.length === 0) {
+      const typeLabel = type === "truth" ? "حقیقت" : "جرأت";
+      await ctx.reply(
+        `هنوز هیچ ${typeLabel} ۱۸+ ای اضافه نکردید — از «📝 سوالات جرأت‌حقیقت من» توی منوی بازی‌ها اضافه کنید، یا گزینه‌ی دیگه رو بزنید.`
+      );
+      return;
+    }
+
+    const kind = `td_${spice}_${type}_${tier}_ext`;
+    const prompt = await db.pickUnusedPrompt(env.DB, kind, combined);
     const header = type === "truth" ? "❓ حقیقت:" : "🎯 جرأت:";
 
-    await broadcastToBoth(ctx.api, env, `${header}\n\n${prompt}\n\nهرچی جواب بدید رو میدم به اون یکی 💜`);
-    for (const id of parseAllowedIds(env)) {
-      await db.setPending(env.DB, id, "answer_relay", "active", {});
+    await db.setPending(env.DB, ctx.from.id, "td_answer", "active", {});
+    await broadcastToBoth(ctx.api, env, `${header}\n\n${prompt}\n\nجوابتو (یا اینکه چیکار کردی) بنویس 💬`);
+  });
+
+  bot.callbackQuery(/^td:custom$/, async (ctx) => {
+    const session = await db.getTdSession(env.DB);
+    if (!session || session.status !== "active") {
+      await ctx.answerCallbackQuery({ text: "بازی‌ای در جریان نیست." });
+      return;
     }
+    if (ctx.from.id !== session.turn) {
+      await ctx.answerCallbackQuery({ text: "نوبت تو نیست ⏳" });
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    await db.setPending(env.DB, ctx.from.id, "td_custom_write", "active", {});
+    await ctx.reply("باشه، خودت یه سوال یا جرأت بنویس که می‌خوای بهش جواب بدی:");
+  });
+
+  bot.callbackQuery(/^td:end$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await db.endTdSession(env.DB);
+    await db.clearActiveGame(env.DB);
+    for (const id of parseAllowedIds(env)) {
+      await db.clearPending(env.DB, id);
+    }
+    await broadcastToBoth(ctx.api, env, "🏁 بازی جرأت یا حقیقت تموم شد.");
+  });
+
+  // ---------- custom (user-submitted) truth-or-dare prompts ----------
+
+  bot.callbackQuery(/^tdcustom:add:(truth|dare):(normal|spicy)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const type = ctx.match[1] as "truth" | "dare";
+    const spice = ctx.match[2] as "normal" | "spicy";
+    await db.setPending(env.DB, ctx.from.id, "custom_td_add", "await_text", { type, spice });
+    const typeLabel = type === "truth" ? "حقیقت" : "جرأت";
+    await ctx.reply(
+      `متن ${typeLabel} رو بنویس — می‌تونی چندتا رو با هم بفرستی، فقط هر کدوم رو تو یه خط جدا بنویس:`,
+      { reply_markup: cancelKeyboard() }
+    );
+  });
+
+  bot.callbackQuery(/^tdcustom:list$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const prompts = await db.listAllCustomTdPrompts(env.DB);
+    if (prompts.length === 0) {
+      await ctx.reply("هنوز سوال/جرأتی اضافه نکردید.", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+    for (const p of prompts) {
+      const typeLabel = p.type === "truth" ? "❓ حقیقت" : "🎯 جرأت";
+      const spiceLabel = p.spice === "spicy" ? "۱۸+" : "معمولی";
+      const keyboard = new InlineKeyboard().text("🗑 حذف", `tdcustom:del:${p.id}`);
+      await ctx.reply(`${typeLabel} (${spiceLabel}):\n${p.text}`, { reply_markup: keyboard });
+    }
+    await ctx.reply("🔙", { reply_markup: mainMenuKeyboard() });
+  });
+
+  bot.callbackQuery(/^tdcustom:del:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await db.deleteCustomTdPrompt(env.DB, Number(ctx.match[1]));
+    await ctx.reply("حذف شد 🗑");
+  });
+
+  // ---------- shared game lock ----------
+
+  bot.callbackQuery(/^game:forcecancel$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await db.clearActiveGame(env.DB);
+    await ctx.reply("بازی فعلی لغو شد ✅ حالا می‌تونید یه بازی جدید شروع کنید.", { reply_markup: mainMenuKeyboard() });
   });
 
   // ---------- mood tracker ----------
@@ -1702,6 +2039,10 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     const action = ctx.match[1];
 
     if (action === "cancel") {
+      const pending = await db.getPending(env.DB, ctx.from.id);
+      if (pending?.flow === "word_chain_start") {
+        await db.clearActiveGame(env.DB);
+      }
       await db.clearPending(env.DB, ctx.from.id);
       await ctx.reply("باشه عزیزم، بی‌خیالش شدیم 🤍", { reply_markup: mainMenuKeyboard() });
       return;
@@ -1805,7 +2146,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     if (pending?.flow === "add_memory" && pending.step === "await_photo") {
       const data = { ...(pending.data as AddMemoryData), fileId: photo.file_id };
       if (ctx.message.caption) {
-        await askLocationStep(ctx, env, { ...data, caption: ctx.message.caption });
+        await askLocationStep(ctx, env, { ...data, caption: sanitizeForTelegram(ctx.message.caption) });
       } else {
         await db.setPending(env.DB, ctx.from.id, "add_memory", "await_caption", data);
         await ctx.reply("توضیح کوتاهی براش داری؟", { reply_markup: skipCancelKeyboard() });
@@ -1848,7 +2189,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     }
 
     // No active wizard: quick spontaneous save, same as before.
-    const caption = ctx.message.caption ?? null;
+    const caption = ctx.message.caption ? sanitizeForTelegram(ctx.message.caption) : null;
     const today = new Date().toISOString().slice(0, 10);
     const memoryId = await db.addMemory(env.DB, photo.file_id, caption, null, today, ctx.from.id);
 
@@ -1865,8 +2206,19 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
 
   // ---------- text messages (routes to whichever wizard step is pending) ----------
 
+  async function relayToPartner(ctx: Context, env: Env, text: string): Promise<void> {
+    const other = otherUserId(env, ctx.from!.id);
+    if (!other) return;
+    const name = getUserName(env, ctx.from!.id);
+    try {
+      await ctx.api.sendMessage(other, `💬 ${name}: ${text}`);
+    } catch (err) {
+      console.error(`relay failed to ${other}`, err);
+    }
+  }
+
   bot.on("message:text", async (ctx) => {
-    const text = ctx.message.text.trim();
+    const text = sanitizeForTelegram(ctx.message.text.trim());
 
     const menuAction = REPLY_BUTTON_ACTIONS[text];
     if (menuAction) {
@@ -1875,19 +2227,57 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       return;
     }
 
-    const pending = await db.getPending(env.DB, ctx.from.id);
-    if (!pending) return;
+    // Word chain is gated on the shared game row's `turn` field rather than on
+    // this user's "pending" wizard slot, so it can't get silently derailed by
+    // an unrelated pending flow, and it never swallows the other player's
+    // normal chat (their messages just don't match `chain.turn`).
+    const chain = await db.getWordChain(env.DB);
+    if (chain?.active && ctx.from.id === chain.turn) {
+      const stopKb = new InlineKeyboard().text("🏳️ تموم کردن بازی", "wordchain:stop");
+      const expectedStart = wordChainLastLetter(chain.last_word);
+      const candidate = meaningfulWordChainText(text);
 
-    if (pending.flow === "answer_relay") {
+      if (!expectedStart || !candidate) {
+        // The stored word (or this reply) has no real letters at all — treat
+        // it as an unrelated message rather than getting the game stuck.
+        await db.endWordChain(env.DB);
+        await relayToPartner(ctx, env, text);
+        return;
+      }
+
+      if (!candidate.startsWith(expectedStart)) {
+        await ctx.reply(`اشتباهه! باید با «${expectedStart}» شروع بشه. دوباره امتحان کن:`, { reply_markup: stopKb });
+        return;
+      }
+
       const other = otherUserId(env, ctx.from.id);
       if (other) {
-        const name = getUserName(env, ctx.from.id);
+        await db.advanceWordChain(env.DB, text, other);
+        await ctx.reply(`آفرین! طول زنجیره: ${toPersianDigits(chain.streak + 1)} 🔗`, { reply_markup: stopKb });
         try {
-          await ctx.api.sendMessage(other, `💬 ${name}: ${text}`);
+          const nextChar = wordChainLastLetter(text) || "؟";
+          await ctx.api.sendMessage(
+            other,
+            `🔤 ${getUserName(env, ctx.from.id)} گفت: «${text}»\nنوبت توئه، یه کلمه بگو که با «${nextChar}» شروع بشه.`,
+            { reply_markup: stopKb }
+          );
         } catch (err) {
-          console.error(`answer relay failed to ${other}`, err);
+          console.error("word_chain: failed to notify other", err);
         }
       }
+      return;
+    }
+
+    const pending = await db.getPending(env.DB, ctx.from.id);
+    if (!pending) {
+      // Nothing active — behave like a normal two-way chat and forward this
+      // message straight to the other person, same as answer_relay below.
+      await relayToPartner(ctx, env, text);
+      return;
+    }
+
+    if (pending.flow === "answer_relay") {
+      await relayToPartner(ctx, env, text);
       return;
     }
 
@@ -1921,59 +2311,81 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       return;
     }
 
+    if (pending.flow === "custom_td_add" && pending.step === "await_text") {
+      const data = pending.data as { type: "truth" | "dare"; spice: "normal" | "spicy" };
+      const lines = splitBulkLines(text);
+      for (const line of lines) {
+        await db.addCustomTdPrompt(env.DB, data.type, data.spice, line, ctx.from.id);
+      }
+      await db.clearPending(env.DB, ctx.from.id);
+      const confirmText =
+        lines.length > 1
+          ? `${toPersianDigits(lines.length)} تا اضافه شد ✅ دفعه‌ی بعد که بازی کنید ممکنه بیان.`
+          : "اضافه شد ✅ دفعه‌ی بعد که بازی کنید ممکنه بیاد.";
+      await ctx.reply(confirmText, { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    if (pending.flow === "td_custom_write") {
+      const session = await db.getTdSession(env.DB);
+      if (!session || session.status !== "active" || ctx.from.id !== session.turn) {
+        await db.clearPending(env.DB, ctx.from.id);
+        return;
+      }
+      await db.setPending(env.DB, ctx.from.id, "td_answer", "active", {});
+      await broadcastToBoth(ctx.api, env, `❓🎯 سوال/جرأتِ خودش:\n\n${text}\n\nجوابتو بنویس 💬`);
+      return;
+    }
+
+    if (pending.flow === "td_answer") {
+      const session = await db.getTdSession(env.DB);
+      if (!session || session.status !== "active" || ctx.from.id !== session.turn) {
+        await db.clearPending(env.DB, ctx.from.id);
+        return;
+      }
+      const other = otherUserId(env, ctx.from.id);
+      await db.clearPending(env.DB, ctx.from.id);
+      if (!other) return;
+
+      try {
+        await ctx.api.sendMessage(other, `💬 ${getUserName(env, ctx.from.id)}: ${text}`);
+      } catch (err) {
+        console.error("td: failed to relay answer", err);
+      }
+
+      await db.setTdTurn(env.DB, other);
+      await sendTdTurnPrompt(ctx.api, env, other);
+      return;
+    }
+
     if (pending.flow === "word_chain_start" && pending.step === "await_word") {
       const other = otherUserId(env, ctx.from.id);
       if (!other) {
         await db.clearPending(env.DB, ctx.from.id);
+        await db.clearActiveGame(env.DB);
         await ctx.reply("این بازی نیاز به هر دو آیدی مجاز داره.", { reply_markup: mainMenuKeyboard() });
         return;
       }
       const word = text;
-      await db.startWordChain(env.DB, word, other);
-      await db.clearPending(env.DB, ctx.from.id);
-      await db.setPending(env.DB, ctx.from.id, "word_chain", "active", {});
-      await db.setPending(env.DB, other, "word_chain", "active", {});
-
-      const lastChar = word[word.length - 1];
-      try {
-        await ctx.api.sendMessage(
-          other,
-          `🔤 ${getUserName(env, ctx.from.id)} گفت: «${word}»\nنوبت توئه، یه کلمه بگو که با «${lastChar}» شروع بشه.`
-        );
-      } catch (err) {
-        console.error("word_chain: failed to notify other", err);
-      }
-      await ctx.reply(`زنجیره شروع شد! منتظر ${getUserName(env, other)} می‌مونیم ⏳`);
-      return;
-    }
-
-    if (pending.flow === "word_chain") {
-      const chain = await db.getWordChain(env.DB);
-      if (!chain || !chain.active) return;
-      if (ctx.from.id !== chain.turn) return;
-
-      const word = text;
-      const expectedStart = chain.last_word[chain.last_word.length - 1];
-      if (!word.startsWith(expectedStart)) {
-        await ctx.reply(`اشتباهه! باید با «${expectedStart}» شروع بشه. دوباره امتحان کن:`);
+      if (!wordChainLastLetter(word)) {
+        await ctx.reply("یه کلمه‌ی واقعی بفرست (فقط ایموجی/علامت نمی‌شه) 🔤");
         return;
       }
+      await db.startWordChain(env.DB, word, other);
+      await db.clearPending(env.DB, ctx.from.id);
 
-      const other = otherUserId(env, ctx.from.id);
-      if (!other) return;
-
-      await db.advanceWordChain(env.DB, word, other);
-      await ctx.reply(`آفرین! طول زنجیره: ${toPersianDigits(chain.streak + 1)} 🔗`);
-
+      const stopKb = new InlineKeyboard().text("🏳️ تموم کردن بازی", "wordchain:stop");
+      const lastChar = wordChainLastLetter(word);
       try {
-        const nextChar = word[word.length - 1];
         await ctx.api.sendMessage(
           other,
-          `🔤 ${getUserName(env, ctx.from.id)} گفت: «${word}»\nنوبت توئه، یه کلمه بگو که با «${nextChar}» شروع بشه.`
+          `🔤 ${getUserName(env, ctx.from.id)} گفت: «${word}»\nنوبت توئه، یه کلمه بگو که با «${lastChar}» شروع بشه.`,
+          { reply_markup: stopKb }
         );
       } catch (err) {
         console.error("word_chain: failed to notify other", err);
       }
+      await ctx.reply(`زنجیره شروع شد! منتظر ${getUserName(env, other)} می‌مونیم ⏳`, { reply_markup: stopKb });
       return;
     }
 

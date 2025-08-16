@@ -610,6 +610,24 @@ export async function finishReactionRound(db: D1Database): Promise<void> {
   await db.prepare("UPDATE reaction_rounds SET status = 'finished' WHERE id = 1").run();
 }
 
+export async function getReactionRecord(db: D1Database, userId: number): Promise<number | null> {
+  const row = await db
+    .prepare("SELECT best_ms FROM reaction_records WHERE user_id = ?")
+    .bind(userId)
+    .first<{ best_ms: number }>();
+  return row?.best_ms ?? null;
+}
+
+export async function setReactionRecord(db: D1Database, userId: number, ms: number): Promise<void> {
+  await db
+    .prepare(
+      "INSERT INTO reaction_records (user_id, best_ms) VALUES (?, ?) " +
+        "ON CONFLICT(user_id) DO UPDATE SET best_ms = excluded.best_ms"
+    )
+    .bind(userId, ms)
+    .run();
+}
+
 // ---------- tic-tac-toe ----------
 
 export interface TttGame {
@@ -970,4 +988,107 @@ export async function listDailyChallengeHistory(db: D1Database, limit = 10): Pro
     .bind(limit)
     .all<DailyChallengeEntry>();
   return res.results ?? [];
+}
+
+// ---------- single-active-game lock ----------
+
+export async function getActiveGame(db: D1Database): Promise<string | null> {
+  const row = await db.prepare("SELECT game_type FROM active_game WHERE id = 1").first<{ game_type: string | null }>();
+  return row?.game_type ?? null;
+}
+
+export async function setActiveGame(db: D1Database, gameType: string): Promise<void> {
+  await db
+    .prepare(
+      "INSERT INTO active_game (id, game_type, started_at) VALUES (1, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET game_type = excluded.game_type, started_at = excluded.started_at"
+    )
+    .bind(gameType, new Date().toISOString())
+    .run();
+}
+
+export async function clearActiveGame(db: D1Database): Promise<void> {
+  await db.prepare("UPDATE active_game SET game_type = NULL, started_at = NULL WHERE id = 1").run();
+}
+
+// ---------- turn-based truth or dare ----------
+
+export interface TdSession {
+  id: number;
+  spice: string;
+  turn: number;
+  status: string;
+  created_at: string;
+}
+
+export async function getTdSession(db: D1Database): Promise<TdSession | null> {
+  const row = await db.prepare("SELECT * FROM td_session WHERE id = 1").first<TdSession>();
+  return row ?? null;
+}
+
+export async function startTdSession(db: D1Database, spice: string, turn: number): Promise<void> {
+  await db
+    .prepare(
+      "INSERT INTO td_session (id, spice, turn, status, created_at) VALUES (1, ?, ?, 'active', ?) " +
+        "ON CONFLICT(id) DO UPDATE SET spice = excluded.spice, turn = excluded.turn, status = 'active', " +
+        "created_at = excluded.created_at"
+    )
+    .bind(spice, turn, new Date().toISOString())
+    .run();
+}
+
+export async function setTdTurn(db: D1Database, turn: number): Promise<void> {
+  await db.prepare("UPDATE td_session SET turn = ? WHERE id = 1").bind(turn).run();
+}
+
+export async function endTdSession(db: D1Database): Promise<void> {
+  await db.prepare("UPDATE td_session SET status = 'ended' WHERE id = 1").run();
+}
+
+// ---------- custom (user-submitted) truth-or-dare prompts ----------
+
+export interface CustomTdPrompt {
+  id: number;
+  type: string;
+  spice: string;
+  text: string;
+  added_by: number;
+  created_at: string;
+}
+
+export async function addCustomTdPrompt(
+  db: D1Database,
+  type: "truth" | "dare",
+  spice: "normal" | "spicy",
+  text: string,
+  addedBy: number
+): Promise<number> {
+  const res = await db
+    .prepare("INSERT INTO custom_td_prompts (type, spice, text, added_by, created_at) VALUES (?, ?, ?, ?, ?)")
+    .bind(type, spice, text, addedBy, new Date().toISOString())
+    .run();
+  return res.meta.last_row_id as number;
+}
+
+export async function listCustomTdPromptTexts(
+  db: D1Database,
+  type: "truth" | "dare",
+  spice: "normal" | "spicy"
+): Promise<string[]> {
+  const res = await db
+    .prepare("SELECT text FROM custom_td_prompts WHERE type = ? AND spice = ?")
+    .bind(type, spice)
+    .all<{ text: string }>();
+  return (res.results ?? []).map((r) => r.text);
+}
+
+export async function listAllCustomTdPrompts(db: D1Database): Promise<CustomTdPrompt[]> {
+  const res = await db
+    .prepare("SELECT * FROM custom_td_prompts ORDER BY created_at DESC")
+    .all<CustomTdPrompt>();
+  return res.results ?? [];
+}
+
+export async function deleteCustomTdPrompt(db: D1Database, id: number): Promise<void> {
+  await db.prepare("DELETE FROM custom_td_prompts WHERE id = ?").bind(id).run();
 }

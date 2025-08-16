@@ -655,7 +655,7 @@ async function sendTdTurnPrompt(api: Api, env: Env, turnUserId: number): Promise
     .text("❓ حقیقت", "td:choose:truth")
     .text("🎯 جرأت", "td:choose:dare")
     .row()
-    .text("✍️ خودم می‌نویسم", "td:custom")
+    .text("✍️ طرف مقابل بنویسه", "td:custom")
     .row()
     .text("🏳️ پایان بازی", "td:end");
   await broadcastWithKeyboard(api, env, `نوبت ${name}ه! چی می‌خوای؟`, keyboard);
@@ -1874,8 +1874,23 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       return;
     }
     await ctx.answerCallbackQuery();
-    await db.setPending(env.DB, ctx.from.id, "td_custom_write", "active", {});
-    await ctx.reply("باشه، خودت یه سوال یا جرأت بنویس که می‌خوای بهش جواب بدی:");
+
+    const other = otherUserId(env, ctx.from.id);
+    if (!other) {
+      await ctx.reply("این بازی نیاز به هر دو آیدی مجاز داره.");
+      return;
+    }
+
+    await db.setPending(env.DB, other, "td_custom_write", "active", { forUserId: ctx.from.id });
+    await ctx.reply("باشه، منتظر می‌مونیم طرف مقابل برات یه سوال یا جرأت بنویسه... ⏳");
+    try {
+      await ctx.api.sendMessage(
+        other,
+        `${getUserName(env, ctx.from.id)} می‌خواد خودت براش یه سوال یا جرأت بنویسی که جوابش رو بده — بنویس:`
+      );
+    } catch (err) {
+      console.error("td: failed to notify custom-prompt writer", err);
+    }
   });
 
   bot.callbackQuery(/^td:end$/, async (ctx) => {
@@ -2411,12 +2426,17 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
 
     if (pending.flow === "td_custom_write") {
       const session = await db.getTdSession(env.DB);
-      if (!session || session.status !== "active" || ctx.from.id !== session.turn) {
-        await db.clearPending(env.DB, ctx.from.id);
+      const forUserId = (pending.data as { forUserId?: number }).forUserId;
+      await db.clearPending(env.DB, ctx.from.id);
+      if (!session || session.status !== "active" || !forUserId || session.turn !== forUserId) {
         return;
       }
-      await db.setPending(env.DB, ctx.from.id, "td_answer", "active", {});
-      await broadcastToBoth(ctx.api, env, `❓🎯 سوال/جرأتِ خودش:\n\n${text}\n\nجوابتو بنویس 💬`);
+      await db.setPending(env.DB, forUserId, "td_answer", "active", {});
+      await broadcastToBoth(
+        ctx.api,
+        env,
+        `❓🎯 سوال/جرأتِ ${getUserName(env, ctx.from.id)} برای ${getUserName(env, forUserId)}:\n\n${text}\n\nجوابتو بنویس 💬`
+      );
       return;
     }
 

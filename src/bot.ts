@@ -2272,12 +2272,26 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
 
   // ---------- text messages (routes to whichever wizard step is pending) ----------
 
+  // The two people talk to the bot in two separate chats, so a native
+  // Telegram "reply" can't be carried over as a real reply_to_message on the
+  // other side — we quote a short snippet of what was replied to instead, so
+  // it's still clear what the message is responding to.
+  function quotedReplySnippet(ctx: Context): string {
+    const replied = ctx.message?.reply_to_message;
+    const original = replied?.text ?? replied?.caption;
+    if (!original) return "";
+    const trimmed = original.length > 60 ? `${original.slice(0, 60)}…` : original;
+    return `↩️ در پاسخ به: «${trimmed}»`;
+  }
+
   async function relayToPartner(ctx: Context, env: Env, text: string): Promise<void> {
     const other = otherUserId(env, ctx.from!.id);
     if (!other) return;
     const name = getUserName(env, ctx.from!.id);
+    const quote = quotedReplySnippet(ctx);
+    const body = quote ? `💬 ${name}:\n${quote}\n${text}` : `💬 ${name}: ${text}`;
     try {
-      await ctx.api.sendMessage(other, `💬 ${name}: ${text}`);
+      await ctx.api.sendMessage(other, body);
     } catch (err) {
       console.error(`relay failed to ${other}`, err);
     }
@@ -2293,7 +2307,8 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     const other = otherUserId(env, ctx.from!.id);
     if (!other) return;
     const name = getUserName(env, ctx.from!.id);
-    const fullCaption = caption ? `💬 ${name}:\n${caption}` : `💬 ${name}`;
+    const extra = [quotedReplySnippet(ctx), caption].filter((line): line is string => Boolean(line));
+    const fullCaption = extra.length > 0 ? `💬 ${name}:\n${extra.join("\n")}` : `💬 ${name}`;
     try {
       if (kind === "photo") await ctx.api.sendPhoto(other, fileId, { caption: fullCaption });
       else if (kind === "animation") await ctx.api.sendAnimation(other, fileId, { caption: fullCaption });
@@ -2307,8 +2322,9 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     const other = otherUserId(env, ctx.from!.id);
     if (!other) return;
     const name = getUserName(env, ctx.from!.id);
+    const quote = quotedReplySnippet(ctx);
     try {
-      await ctx.api.sendMessage(other, `💬 ${name}:`);
+      await ctx.api.sendMessage(other, quote ? `💬 ${name}:\n${quote}` : `💬 ${name}:`);
       await ctx.api.sendSticker(other, fileId);
     } catch (err) {
       console.error(`sticker relay failed to ${other}`, err);
@@ -2450,11 +2466,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       await db.clearPending(env.DB, ctx.from.id);
       if (!other) return;
 
-      try {
-        await ctx.api.sendMessage(other, `💬 ${getUserName(env, ctx.from.id)}: ${text}`);
-      } catch (err) {
-        console.error("td: failed to relay answer", err);
-      }
+      await relayToPartner(ctx, env, text);
 
       await db.setTdTurn(env.DB, other);
       await sendTdTurnPrompt(ctx.api, env, other);

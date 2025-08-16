@@ -154,7 +154,7 @@ async function sendMoodPrompt(env: Env, api: Api, ids: number[]): Promise<void> 
   for (const id of ids) {
     const name = getUserName(env, id);
     try {
-      await api.sendMessage(id, `${name} جان، امروز دلت چطوره؟ 💜`, { reply_markup: moodKeyboard() });
+      await api.sendMessage(id, `${name} جان، امروز حالت چطوره؟ 💜`, { reply_markup: moodKeyboard() });
     } catch (err) {
       console.error(`mood prompt failed for ${id}`, err);
     }

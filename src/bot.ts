@@ -1024,7 +1024,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     } else if (action === "month_recap") {
       await sendMonthRecap(ctx, env);
     } else if (action === "mood") {
-      await ctx.reply(`دلت امروز چطوره، ${name} جان؟ 💜`, { reply_markup: moodKeyboard() });
+      await ctx.reply(`حالت امروز چطوره، ${name} جان؟ 💜`, { reply_markup: moodKeyboard() });
     } else if (action === "secret_messages") {
       const keyboard = new InlineKeyboard()
         .text("✍️ نوشتن پیام جدید", "secret:new")

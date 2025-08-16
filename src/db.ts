@@ -97,6 +97,25 @@ export async function listRecentMemories(db: D1Database, limit = 5): Promise<Mem
   return res.results ?? [];
 }
 
+export async function findMemoriesByDate(db: D1Database, memoryDate: string): Promise<Memory[]> {
+  const res = await db
+    .prepare("SELECT * FROM memories WHERE memory_date = ? ORDER BY id DESC")
+    .bind(memoryDate)
+    .all<Memory>();
+  return res.results ?? [];
+}
+
+export async function searchMemories(db: D1Database, keyword: string, limit = 10): Promise<Memory[]> {
+  const like = `%${keyword}%`;
+  const res = await db
+    .prepare(
+      "SELECT * FROM memories WHERE caption LIKE ? OR location LIKE ? ORDER BY memory_date DESC, id DESC LIMIT ?"
+    )
+    .bind(like, like, limit)
+    .all<Memory>();
+  return res.results ?? [];
+}
+
 export async function countMemoriesBetween(db: D1Database, startDate: string, endDate: string): Promise<number> {
   const row = await db
     .prepare("SELECT COUNT(*) AS c FROM memories WHERE memory_date >= ? AND memory_date < ?")

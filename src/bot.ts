@@ -289,8 +289,47 @@ async function finishAddMemory(ctx: Context, env: Env, data: AddMemoryData): Pro
   await ctx.reply(mainMenuText(getUserName(env, ctx.from!.id)), { reply_markup: mainMenuKeyboard() });
 }
 
+function memoryPreviewLabel(m: db.Memory): string {
+  const datePart = formatJalali(m.memory_date);
+  const rawSnippet = m.location ? `📍 ${m.location}` : m.caption ? m.caption : "";
+  const snippet = rawSnippet.replace(/\s+/g, " ").trim();
+  const trimmedSnippet = snippet.length > 25 ? `${snippet.slice(0, 25)}…` : snippet;
+  return trimmedSnippet ? `${datePart} — ${trimmedSnippet}` : datePart;
+}
+
+async function showMemoryDetail(ctx: Context, env: Env, id: number): Promise<void> {
+  const m = await db.getMemory(env.DB, id);
+  if (!m) {
+    await ctx.reply("این خاطره پیدا نشد، شاید حذف شده باشه.", { reply_markup: mainMenuKeyboard() });
+    return;
+  }
+
+  const keyboard = new InlineKeyboard()
+    .text("✏️ توضیح", `mementry:${m.id}:caption`)
+    .text("📍 مکان", `mementry:${m.id}:location`)
+    .row()
+    .text("📅 تاریخ", `mementry:${m.id}:date`)
+    .text("🗑 حذف", `memdel:${m.id}`);
+
+  const caption = formatMemoryCaption(m);
+  if (m.file_id) {
+    await ctx.replyWithPhoto(m.file_id, { caption, reply_markup: keyboard });
+  } else {
+    await ctx.reply(caption, { reply_markup: keyboard });
+  }
+}
+
+async function sendMemoriesResultList(ctx: Context, memories: db.Memory[], header: string): Promise<void> {
+  const keyboard = new InlineKeyboard();
+  for (const m of memories) {
+    keyboard.text(memoryPreviewLabel(m), `memshow:${m.id}`).row();
+  }
+  keyboard.text("🔍 جستجوی خاطره", "menu:search_memory");
+  await ctx.reply(header, { reply_markup: keyboard });
+}
+
 async function sendMemoriesList(ctx: Context, env: Env): Promise<void> {
-  const memories = await db.listRecentMemories(env.DB, 5);
+  const memories = await db.listRecentMemories(env.DB, 10);
   if (memories.length === 0) {
     await ctx.reply("هنوز چیزی ثبت نکردید، بزن بریم اولیش رو بسازیم 💜", {
       reply_markup: mainMenuKeyboard(),
@@ -298,23 +337,7 @@ async function sendMemoriesList(ctx: Context, env: Env): Promise<void> {
     return;
   }
 
-  for (const m of memories) {
-    const keyboard = new InlineKeyboard()
-      .text("✏️ توضیح", `mementry:${m.id}:caption`)
-      .text("📍 مکان", `mementry:${m.id}:location`)
-      .row()
-      .text("📅 تاریخ", `mementry:${m.id}:date`)
-      .text("🗑 حذف", `memdel:${m.id}`);
-
-    const caption = formatMemoryCaption(m);
-    if (m.file_id) {
-      await ctx.replyWithPhoto(m.file_id, { caption, reply_markup: keyboard });
-    } else {
-      await ctx.reply(caption, { reply_markup: keyboard });
-    }
-  }
-
-  await ctx.reply(mainMenuText(getUserName(env, ctx.from!.id)), { reply_markup: mainMenuKeyboard() });
+  await sendMemoriesResultList(ctx, memories, "📸 خاطرات اخیر — رو هرکدوم بزن ببینیش کامل:");
 }
 
 async function sendAnniversariesList(ctx: Context, env: Env): Promise<void> {
@@ -991,6 +1014,11 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       });
     } else if (action === "list_memories") {
       await sendMemoriesList(ctx, env);
+    } else if (action === "search_memory") {
+      await db.setPending(env.DB, ctx.from!.id, "search_memory", "await_query", {});
+      await ctx.reply("یه تاریخ (مثلاً ۱۴۰۳-۰۵-۲۰) یا یه کلمه/جمله از توضیح یا مکانش بفرست تا پیدا کنم 🔍", {
+        reply_markup: cancelKeyboard(),
+      });
     } else if (action === "list_anniversaries") {
       await sendAnniversariesList(ctx, env);
     } else if (action === "month_recap") {
@@ -2077,6 +2105,11 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     }
   });
 
+  bot.callbackQuery(/^memshow:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showMemoryDetail(ctx, env, Number(ctx.match[1]));
+  });
+
   // ---------- edit entry points (memory) ----------
 
   bot.callbackQuery(/^mementry:(\d+):(caption|location|date)$/, async (ctx) => {
@@ -2386,6 +2419,19 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
         console.error("word_chain: failed to notify other", err);
       }
       await ctx.reply(`زنجیره شروع شد! منتظر ${getUserName(env, other)} می‌مونیم ⏳`, { reply_markup: stopKb });
+      return;
+    }
+
+    if (pending.flow === "search_memory") {
+      await db.clearPending(env.DB, ctx.from.id);
+      const asDate = parseDateInput(text);
+      const results = asDate ? await db.findMemoriesByDate(env.DB, asDate) : await db.searchMemories(env.DB, text);
+
+      if (results.length === 0) {
+        await ctx.reply("چیزی پیدا نکردم 🤔 یه تاریخ یا کلمه‌ی دیگه امتحان کن.", { reply_markup: mainMenuKeyboard() });
+        return;
+      }
+      await sendMemoriesResultList(ctx, results, `${toPersianDigits(results.length)} تا خاطره پیدا شد:`);
       return;
     }
 

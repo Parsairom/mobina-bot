@@ -2221,10 +2221,12 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       return;
     }
 
-    // No active wizard: quick spontaneous save, same as before.
+    // No active wizard: quick spontaneous save, same as before — and also
+    // forward it to the partner, same as a plain chat message would be.
     const caption = ctx.message.caption ? sanitizeForTelegram(ctx.message.caption) : null;
     const today = new Date().toISOString().slice(0, 10);
     const memoryId = await db.addMemory(env.DB, photo.file_id, caption, null, today, ctx.from.id);
+    await relayMediaToPartner(ctx, env, "photo", photo.file_id, caption);
 
     const keyboard = new InlineKeyboard()
       .text("✏️ توضیح", `mementry:${memoryId}:caption`)
@@ -2237,6 +2239,22 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     });
   });
 
+  // ---------- stickers, GIFs, videos: just forward straight to the partner ----------
+
+  bot.on("message:sticker", async (ctx) => {
+    await relayStickerToPartner(ctx, env, ctx.message.sticker.file_id);
+  });
+
+  bot.on("message:animation", async (ctx) => {
+    const caption = ctx.message.caption ? sanitizeForTelegram(ctx.message.caption) : null;
+    await relayMediaToPartner(ctx, env, "animation", ctx.message.animation.file_id, caption);
+  });
+
+  bot.on("message:video", async (ctx) => {
+    const caption = ctx.message.caption ? sanitizeForTelegram(ctx.message.caption) : null;
+    await relayMediaToPartner(ctx, env, "video", ctx.message.video.file_id, caption);
+  });
+
   // ---------- text messages (routes to whichever wizard step is pending) ----------
 
   async function relayToPartner(ctx: Context, env: Env, text: string): Promise<void> {
@@ -2247,6 +2265,38 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       await ctx.api.sendMessage(other, `💬 ${name}: ${text}`);
     } catch (err) {
       console.error(`relay failed to ${other}`, err);
+    }
+  }
+
+  async function relayMediaToPartner(
+    ctx: Context,
+    env: Env,
+    kind: "photo" | "animation" | "video",
+    fileId: string,
+    caption: string | null
+  ): Promise<void> {
+    const other = otherUserId(env, ctx.from!.id);
+    if (!other) return;
+    const name = getUserName(env, ctx.from!.id);
+    const fullCaption = caption ? `💬 ${name}:\n${caption}` : `💬 ${name}`;
+    try {
+      if (kind === "photo") await ctx.api.sendPhoto(other, fileId, { caption: fullCaption });
+      else if (kind === "animation") await ctx.api.sendAnimation(other, fileId, { caption: fullCaption });
+      else await ctx.api.sendVideo(other, fileId, { caption: fullCaption });
+    } catch (err) {
+      console.error(`${kind} relay failed to ${other}`, err);
+    }
+  }
+
+  async function relayStickerToPartner(ctx: Context, env: Env, fileId: string): Promise<void> {
+    const other = otherUserId(env, ctx.from!.id);
+    if (!other) return;
+    const name = getUserName(env, ctx.from!.id);
+    try {
+      await ctx.api.sendMessage(other, `💬 ${name}:`);
+      await ctx.api.sendSticker(other, fileId);
+    } catch (err) {
+      console.error(`sticker relay failed to ${other}`, err);
     }
   }
 

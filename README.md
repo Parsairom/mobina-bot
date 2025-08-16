@@ -1,5 +1,7 @@
 # Mobina Bot
 
+**English | [فارسی](README.fa.md)**
+
 A serverless Telegram bot that acts as a shared memory keeper for two people in a relationship — an archive for photos and moments, smart anniversary reminders, a daily mood tracker, and a small hub of two-player games, all running on Cloudflare's edge with no server to maintain.
 
 It started as a personal project (built for my partner and me) and doubles as a demonstration of building a stateful, scheduled, multi-feature bot entirely on serverless infrastructure.
@@ -70,7 +72,7 @@ cf-worker/
 Requires Node.js 20+, a Cloudflare account, and a Telegram bot token (create one via [@BotFather](https://t.me/BotFather)).
 
 ```bash
-git clone https://github.com/<your-username>/mobina-bot.git
+git clone https://github.com/Parsairom/mobina-bot.git
 cd mobina-bot/cf-worker
 npm install
 npx wrangler login

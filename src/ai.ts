@@ -1,7 +1,6 @@
 import type { Env } from "./env";
 
-// Gemini has a genuinely free tier (unlike Anthropic, which only gives a
-// small one-time trial credit), so the AI-powered features use it by default.
+// Gemini has a genuinely free tier, so the AI-powered features use it by default.
 //
 // New Gemini API keys are cut over to the newer Interactions API
 // (generateContent/gemini-2.5-flash returns 404 "no longer available to new

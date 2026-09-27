@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { computeActivityStreak, parseAmount, rpsWinner } from "../src/bot";
+import {
+  computeActivityStreak,
+  meaningfulWordChainText,
+  parseAmount,
+  rpsWinner,
+  wordChainLastLetter,
+} from "../src/bot";
 
 function utc(y: number, m: number, d: number): Date {
   return new Date(Date.UTC(y, m - 1, d));
@@ -73,5 +79,26 @@ describe("computeActivityStreak", () => {
   it("is 0 if neither today nor yesterday had joint activity", () => {
     const dates = ["2026-09-20"];
     expect(computeActivityStreak(dates, utc(2026, 9, 27))).toBe(0);
+  });
+});
+
+describe("word-chain emoji regression (previously hijacked every message)", () => {
+  it("strips a trailing emoji so the real last letter is used", () => {
+    expect(meaningfulWordChainText("کون😂")).toBe("کون");
+    expect(wordChainLastLetter("کون😂")).toBe("ن");
+  });
+
+  it("strips leading/trailing punctuation and whitespace", () => {
+    expect(meaningfulWordChainText("  «سلام»! ")).toBe("سلام");
+  });
+
+  it("returns an empty string for an all-emoji/punctuation word", () => {
+    expect(meaningfulWordChainText("😂🎉")).toBe("");
+    expect(wordChainLastLetter("😂🎉")).toBe("");
+  });
+
+  it("leaves an ordinary word untouched", () => {
+    expect(meaningfulWordChainText("سلام")).toBe("سلام");
+    expect(wordChainLastLetter("سلام")).toBe("م");
   });
 });

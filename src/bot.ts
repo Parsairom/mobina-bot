@@ -521,11 +521,11 @@ function sanitizeForTelegram(text: string): string {
 // first letter), which silently hijacks every future message from whoever's
 // turn it is — including unrelated things like an add-memory caption. Strip
 // non-letter characters from both ends before picking the letter to match.
-function meaningfulWordChainText(word: string): string {
+export function meaningfulWordChainText(word: string): string {
   return word.trim().replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "");
 }
 
-function wordChainLastLetter(word: string): string {
+export function wordChainLastLetter(word: string): string {
   const trimmed = meaningfulWordChainText(word);
   return trimmed ? trimmed[trimmed.length - 1] : "";
 }

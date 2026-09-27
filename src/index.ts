@@ -43,13 +43,6 @@ export default {
     // `bot.handleUpdate` directly and awaiting it ourselves guarantees every
     // handler in the chain has actually completed before we return.
     try {
-      const bodyText = await request.clone().text();
-      const codePoints = Array.from(bodyText)
-        .map((ch) => ch.codePointAt(0)!.toString(16))
-        .join(",");
-      logDebug(`RAW_CODEPOINTS: ${codePoints}`);
-      logDebug(`RAW_BODY: ${bodyText}`);
-
       const update = (await request.json()) as Update;
       const bot = createBot(env, ctx);
       await bot.init();

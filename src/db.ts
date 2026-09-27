@@ -1116,3 +1116,62 @@ export async function listAllCustomTdPrompts(db: D1Database): Promise<CustomTdPr
 export async function deleteCustomTdPrompt(db: D1Database, id: number): Promise<void> {
   await db.prepare("DELETE FROM custom_td_prompts WHERE id = ?").bind(id).run();
 }
+
+// ---------- shared wishlist ----------
+
+export interface WishlistItem {
+  id: number;
+  text: string;
+  done: number;
+  created_by: number;
+  created_at: string;
+  done_at: string | null;
+}
+
+export async function addWishlistItem(db: D1Database, text: string, createdBy: number): Promise<number> {
+  const res = await db
+    .prepare("INSERT INTO wishlist_items (text, created_by, created_at) VALUES (?, ?, ?)")
+    .bind(text, createdBy, new Date().toISOString())
+    .run();
+  return res.meta.last_row_id as number;
+}
+
+export async function listWishlistItems(db: D1Database): Promise<WishlistItem[]> {
+  const res = await db
+    .prepare("SELECT * FROM wishlist_items ORDER BY done ASC, id DESC")
+    .all<WishlistItem>();
+  return res.results ?? [];
+}
+
+export async function toggleWishlistItem(db: D1Database, id: number): Promise<void> {
+  await db
+    .prepare(
+      "UPDATE wishlist_items SET done = 1 - done, done_at = CASE WHEN done = 0 THEN ? ELSE NULL END WHERE id = ?"
+    )
+    .bind(new Date().toISOString(), id)
+    .run();
+}
+
+export async function deleteWishlistItem(db: D1Database, id: number): Promise<void> {
+  await db.prepare("DELETE FROM wishlist_items WHERE id = ?").bind(id).run();
+}
+
+// ---------- daily activity streak ----------
+
+export async function recordActivity(db: D1Database, userId: number, date: string): Promise<void> {
+  await db
+    .prepare("INSERT OR IGNORE INTO activity_log (user_id, activity_date) VALUES (?, ?)")
+    .bind(userId, date)
+    .run();
+}
+
+export async function getBothActiveDates(db: D1Database, sinceDate: string): Promise<string[]> {
+  const res = await db
+    .prepare(
+      "SELECT activity_date FROM activity_log WHERE activity_date >= ? " +
+        "GROUP BY activity_date HAVING COUNT(DISTINCT user_id) >= 2 ORDER BY activity_date DESC"
+    )
+    .bind(sinceDate)
+    .all<{ activity_date: string }>();
+  return (res.results ?? []).map((r) => r.activity_date);
+}

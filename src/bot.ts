@@ -62,6 +62,9 @@ function mainMenuKeyboard(): InlineKeyboard {
     .text("💌 پیام‌های مخفی", "menu:secret_messages")
     .text("📝 نکته‌های کوچیک", "menu:notes")
     .row()
+    .text("❤️ بهت فکر می‌کنم", "menu:thinking_of_you")
+    .text("🎯 آرزوهای مشترک", "menu:wishlist")
+    .row()
     .text("🎮 بازی‌ها", "menu:games")
     .row()
     .text("💰 کیف پول مشترک", "menu:savings")
@@ -85,6 +88,8 @@ const BTN_MONTH_RECAP = "📅 خلاصه این ماه";
 const BTN_MOOD = "😊 حالم چطوره";
 const BTN_SECRET = "💌 پیام‌های مخفی";
 const BTN_NOTES = "📝 نکته‌های کوچیک";
+const BTN_THINKING = "❤️ بهت فکر می‌کنم";
+const BTN_WISHLIST = "🎯 آرزوهای مشترک";
 const BTN_GAMES = "🎮 بازی‌ها";
 const BTN_SAVINGS = "💰 کیف پول مشترک";
 const BTN_STATS = "📊 آمار بات";
@@ -102,6 +107,8 @@ const REPLY_BUTTON_ACTIONS: Record<string, string> = {
   [BTN_MOOD]: "mood",
   [BTN_SECRET]: "secret_messages",
   [BTN_NOTES]: "notes",
+  [BTN_THINKING]: "thinking_of_you",
+  [BTN_WISHLIST]: "wishlist",
   [BTN_GAMES]: "games",
   [BTN_SAVINGS]: "savings",
   [BTN_STATS]: "stats",
@@ -124,6 +131,9 @@ function mainReplyKeyboard(): Keyboard {
     .row()
     .text(BTN_SECRET)
     .text(BTN_NOTES)
+    .row()
+    .text(BTN_THINKING)
+    .text(BTN_WISHLIST)
     .row()
     .text(BTN_GAMES)
     .row()
@@ -445,11 +455,30 @@ async function sendSavingsStatus(ctx: Context, env: Env): Promise<void> {
   await ctx.reply(lines.join("\n"), { reply_markup: mainMenuKeyboard() });
 }
 
+export function computeActivityStreak(activeDates: string[], today: Date): number {
+  const set = new Set(activeDates);
+  let cursor = toISODate(today);
+  if (!set.has(cursor)) {
+    cursor = toISODate(new Date(today.getTime() - 86_400_000));
+  }
+  let streak = 0;
+  while (set.has(cursor)) {
+    streak++;
+    cursor = toISODate(new Date(parseISODate(cursor).getTime() - 86_400_000));
+  }
+  return streak;
+}
+
 async function sendStats(ctx: Context, env: Env): Promise<void> {
   const stats = await db.getStats(env.DB);
   const daysTogether = stats.earliestDate
     ? Math.floor((todayUTC().getTime() - parseISODate(stats.earliestDate).getTime()) / 86_400_000)
     : null;
+
+  const today = todayUTC();
+  const sinceDate = toISODate(new Date(today.getTime() - 400 * 86_400_000));
+  const activeDates = await db.getBothActiveDates(env.DB, sinceDate);
+  const activityStreak = computeActivityStreak(activeDates, today);
 
   const lines = [
     "📊 آمار بات 💜",
@@ -467,6 +496,11 @@ async function sendStats(ctx: Context, env: Env): Promise<void> {
   if (daysTogether !== null && stats.earliestDate) {
     lines.push(`💕 ${toPersianDigits(daysTogether)} روزه که این خاطرات رو با هم می‌سازید (از ${formatJalali(stats.earliestDate)})`);
   }
+  lines.push(
+    activityStreak > 0
+      ? `🔥 ${toPersianDigits(activityStreak)} روز پشت‌سرهم هر دوتون توی بات فعال بودید`
+      : "🔥 هنوز استریک فعالیت مشترکی شروع نشده — امروز هر دو یه پیام بفرستید تا شروع بشه"
+  );
 
   await ctx.reply(lines.join("\n"), { reply_markup: mainMenuKeyboard() });
 }
@@ -999,6 +1033,14 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     await next();
   });
 
+  bot.use(async (ctx, next) => {
+    if (ctx.from) {
+      const today = new Date().toISOString().slice(0, 10);
+      await db.recordActivity(env.DB, ctx.from.id, today).catch((err) => console.error("recordActivity failed", err));
+    }
+    await next();
+  });
+
   bot.command("start", async (ctx) => {
     if (!ctx.from) return;
     await ctx.reply(HELP_TEXT);
@@ -1285,6 +1327,27 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
         .row()
         .text("🔙 بازگشت به منو", "menu:main");
       await ctx.reply("هرچی درباره‌ی هم یادت می‌مونه رو اینجا بنویس ✨", { reply_markup: keyboard });
+    } else if (action === "thinking_of_you") {
+      const other = otherUserId(env, ctx.from!.id);
+      if (!other) {
+        await ctx.reply("این قابلیت نیاز به هر دو آیدی مجاز داره.", { reply_markup: mainMenuKeyboard() });
+        return;
+      }
+      try {
+        await ctx.api.sendMessage(other, `❤️ ${getUserName(env, ctx.from!.id)} داره بهت فکر می‌کنه...`);
+        await ctx.reply("فرستاده شد ❤️");
+      } catch (err) {
+        console.error("thinking_of_you failed", err);
+        await ctx.reply("نتونستم بفرستم، دوباره امتحان کن.");
+      }
+    } else if (action === "wishlist") {
+      const keyboard = new InlineKeyboard()
+        .text("✍️ افزودن آرزو", "wish:new")
+        .row()
+        .text("📋 لیست آرزوها", "wish:list")
+        .row()
+        .text("🔙 بازگشت به منو", "menu:main");
+      await ctx.reply("چیزهایی که می‌خواید با هم انجام بدید 🎯", { reply_markup: keyboard });
     } else if (action === "stats") {
       await sendStats(ctx, env);
     } else if (action === "export") {
@@ -2097,6 +2160,47 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     );
   });
 
+  // ---------- shared wishlist ----------
+
+  bot.callbackQuery(/^wish:(new|list)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const action = ctx.match[1];
+
+    if (action === "new") {
+      await db.setPending(env.DB, ctx.from.id, "add_wish", "await_text", {});
+      await ctx.reply("چی می‌خواید با هم انجام بدید؟ (مثلاً «رفتن به شمال») 🎯", {
+        reply_markup: cancelKeyboard(),
+      });
+      return;
+    }
+
+    const items = await db.listWishlistItems(env.DB);
+    if (items.length === 0) {
+      await ctx.reply("هنوز آرزویی ثبت نشده 🎯", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+    for (const item of items) {
+      const keyboard = new InlineKeyboard()
+        .text(item.done ? "⬜ برگردون به انجام‌نشده" : "✅ انجامش دادیم", `wish:toggle:${item.id}`)
+        .text("🗑 حذف", `wish:del:${item.id}`);
+      const label = item.done ? `✅ ${item.text}` : `⬜ ${item.text}`;
+      await ctx.reply(label, { reply_markup: keyboard });
+    }
+    await ctx.reply(mainMenuText(getUserName(env, ctx.from.id)), { reply_markup: mainMenuKeyboard() });
+  });
+
+  bot.callbackQuery(/^wish:toggle:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await db.toggleWishlistItem(env.DB, Number(ctx.match[1]));
+    await ctx.reply("به‌روز شد ✅");
+  });
+
+  bot.callbackQuery(/^wish:del:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await db.deleteWishlistItem(env.DB, Number(ctx.match[1]));
+    await ctx.reply("حذف شد 🗑");
+  });
+
   // ---------- add-memory wizard ----------
 
   bot.callbackQuery(/^newmem:(photo|text|skip|today|cancel)$/, async (ctx) => {
@@ -2297,6 +2401,11 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     await relayMediaToPartner(ctx, env, "video", ctx.message.video.file_id, caption);
   });
 
+  bot.on("message:voice", async (ctx) => {
+    const caption = ctx.message.caption ? sanitizeForTelegram(ctx.message.caption) : null;
+    await relayMediaToPartner(ctx, env, "voice", ctx.message.voice.file_id, caption);
+  });
+
   // ---------- text messages (routes to whichever wizard step is pending) ----------
 
   // The two people talk to the bot in two separate chats, so a native
@@ -2327,7 +2436,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
   async function relayMediaToPartner(
     ctx: Context,
     env: Env,
-    kind: "photo" | "animation" | "video",
+    kind: "photo" | "animation" | "video" | "voice",
     fileId: string,
     caption: string | null
   ): Promise<void> {
@@ -2339,7 +2448,8 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     try {
       if (kind === "photo") await ctx.api.sendPhoto(other, fileId, { caption: fullCaption });
       else if (kind === "animation") await ctx.api.sendAnimation(other, fileId, { caption: fullCaption });
-      else await ctx.api.sendVideo(other, fileId, { caption: fullCaption });
+      else if (kind === "video") await ctx.api.sendVideo(other, fileId, { caption: fullCaption });
+      else await ctx.api.sendVoice(other, fileId, { caption: fullCaption });
     } catch (err) {
       console.error(`${kind} relay failed to ${other}`, err);
     }
@@ -2548,6 +2658,13 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       await db.addNote(env.DB, ctx.from.id, text);
       await db.clearPending(env.DB, ctx.from.id);
       await ctx.reply("ثبت شد ✨ یادم می‌مونه.", { reply_markup: mainMenuKeyboard() });
+      return;
+    }
+
+    if (pending.flow === "add_wish") {
+      await db.addWishlistItem(env.DB, text, ctx.from.id);
+      await db.clearPending(env.DB, ctx.from.id);
+      await ctx.reply("اضافه شد به لیست آرزوها 🎯", { reply_markup: mainMenuKeyboard() });
       return;
     }
 

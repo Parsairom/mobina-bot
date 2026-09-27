@@ -1409,7 +1409,14 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     }
 
     const otherMove = await db.getRpsMove(env.DB, other);
-    if (!otherMove) {
+    // A move sitting from a round that was never finished (the other person
+    // never replied) shouldn't get silently resolved against later — only
+    // count it if it was made recently, in what's really "this" round.
+    const RPS_ROUND_WINDOW_MS = 10 * 60 * 1000;
+    const isFresh = otherMove && Date.now() - new Date(otherMove.created_at).getTime() < RPS_ROUND_WINDOW_MS;
+
+    if (!isFresh) {
+      if (otherMove) await db.clearRpsMoves(env.DB, [other]);
       await ctx.reply(`حرکتت (${RPS_LABELS[move]}) ثبت شد، منتظر ${getUserName(env, other)} می‌مونیم... ⏳`);
       return;
     }

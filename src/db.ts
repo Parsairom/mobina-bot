@@ -536,6 +536,7 @@ export async function getSavingsGoal(db: D1Database): Promise<SavingsGoal | null
 export interface RpsMove {
   user_id: number;
   move: string;
+  created_at: string;
 }
 
 export async function setRpsMove(db: D1Database, userId: number, move: string): Promise<void> {

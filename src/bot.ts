@@ -328,16 +328,38 @@ async function sendMemoriesResultList(ctx: Context, memories: db.Memory[], heade
   await ctx.reply(header, { reply_markup: keyboard });
 }
 
-async function sendMemoriesList(ctx: Context, env: Env): Promise<void> {
-  const memories = await db.listRecentMemories(env.DB, 10);
-  if (memories.length === 0) {
+const MEMORIES_PAGE_SIZE = 10;
+
+async function sendMemoriesList(ctx: Context, env: Env, page = 0): Promise<void> {
+  const total = await db.countAllMemories(env.DB);
+  if (total === 0) {
     await ctx.reply("هنوز چیزی ثبت نکردید، بزن بریم اولیش رو بسازیم 💜", {
       reply_markup: mainMenuKeyboard(),
     });
     return;
   }
 
-  await sendMemoriesResultList(ctx, memories, "📸 خاطرات اخیر — رو هرکدوم بزن ببینیش کامل:");
+  const totalPages = Math.max(1, Math.ceil(total / MEMORIES_PAGE_SIZE));
+  const clampedPage = Math.min(Math.max(page, 0), totalPages - 1);
+  const memories = await db.listRecentMemories(env.DB, MEMORIES_PAGE_SIZE, clampedPage * MEMORIES_PAGE_SIZE);
+
+  const keyboard = new InlineKeyboard();
+  for (const m of memories) {
+    keyboard.text(memoryPreviewLabel(m), `memshow:${m.id}`).row();
+  }
+  if (totalPages > 1) {
+    if (clampedPage > 0) keyboard.text("◀️ جدیدتر", `memlist:${clampedPage - 1}`);
+    if (clampedPage < totalPages - 1) keyboard.text("قدیمی‌تر ▶️", `memlist:${clampedPage + 1}`);
+    keyboard.row();
+  }
+  keyboard.text("🔍 جستجوی خاطره", "menu:search_memory");
+
+  const header =
+    totalPages > 1
+      ? `📸 خاطرات — صفحه ${toPersianDigits(clampedPage + 1)} از ${toPersianDigits(totalPages)} (${toPersianDigits(total)} خاطره) — رو هرکدوم بزن ببینیش کامل:`
+      : "📸 خاطرات اخیر — رو هرکدوم بزن ببینیش کامل:";
+
+  await ctx.reply(header, { reply_markup: keyboard });
 }
 
 async function sendAnniversariesList(ctx: Context, env: Env): Promise<void> {
@@ -2123,6 +2145,11 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
   bot.callbackQuery(/^memshow:(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     await showMemoryDetail(ctx, env, Number(ctx.match[1]));
+  });
+
+  bot.callbackQuery(/^memlist:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await sendMemoriesList(ctx, env, Number(ctx.match[1]));
   });
 
   // ---------- edit entry points (memory) ----------

@@ -89,12 +89,17 @@ export async function getAllMemories(db: D1Database): Promise<Memory[]> {
   return res.results ?? [];
 }
 
-export async function listRecentMemories(db: D1Database, limit = 5): Promise<Memory[]> {
+export async function listRecentMemories(db: D1Database, limit = 5, offset = 0): Promise<Memory[]> {
   const res = await db
-    .prepare("SELECT * FROM memories ORDER BY memory_date DESC, id DESC LIMIT ?")
-    .bind(limit)
+    .prepare("SELECT * FROM memories ORDER BY memory_date DESC, id DESC LIMIT ? OFFSET ?")
+    .bind(limit, offset)
     .all<Memory>();
   return res.results ?? [];
+}
+
+export async function countAllMemories(db: D1Database): Promise<number> {
+  const row = await db.prepare("SELECT COUNT(*) AS c FROM memories").first<{ c: number }>();
+  return row?.c ?? 0;
 }
 
 export async function findMemoriesByDate(db: D1Database, memoryDate: string): Promise<Memory[]> {

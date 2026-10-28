@@ -3,15 +3,17 @@ import { Api, Bot, InlineKeyboard, InputFile, Keyboard, type Context } from "gra
 import { askAi, askAiVision, isAiConfigured } from "./ai";
 import {
   COUPLE_QUESTIONS,
+  DATE_IDEAS,
   DARE_NORMAL,
   DARE_SPICY,
   HANGMAN_CATEGORIES,
+  LOVE_FORTUNES,
   NEVER_HAVE_I_EVER,
   THIS_OR_THAT,
   TRUTH_NORMAL,
   TRUTH_SPICY,
   type Tier,
-  WEEKLY_CHALLENGES,
+  WHAT_TO_EAT,
 } from "./content";
 import * as db from "./db";
 import { daysUntil, parseISODate, todayUTC, toISODate, yearsSince } from "./dates";
@@ -39,13 +41,21 @@ import { getUserName } from "./names";
 const DATE_HINT = "شمسی بفرست، مثلاً ۱۴۰۳-۰۵-۲۰";
 
 const HELP_TEXT =
-  "سلاااام پارسا و مبینا 💜\n" +
-  "منم اون رباتی که خاطراتتون رو یادش می‌مونه، که هیچی یادتون نره.\n\n" +
-  "📸 هر عکسی بفرستی خودش ذخیره می‌شه.\n" +
-  "برای بقیه‌ی کارا از دکمه‌های پایین استفاده کن، یا هر وقت گم شدی /menu رو بزن.";
+  "سلام پارسا و مبینا 💜\n" +
+  "من دفترچه‌ی خاطره، بازی و قرارای شماهام؛ هیچی از دستتون نمی‌ره.\n\n" +
+  "📸 عکس بفرستی، خودم نگهش می‌دارم.\n" +
+  "هر وقت گم شدی یا هوس یه چیز جدید کردی، /menu رو بزن یا از دکمه‌های پایین استفاده کن.\n" +
+  "من خودم سرتون غر نمی‌زنم و ازتون چیزی نمی‌پرسم؛ فقط وقتی یه سالگرد یا خاطره‌ی قدیمی در راهه خبرتون می‌کنم.";
+
+const MENU_GREETINGS = [
+  (name: string) => `${name} جان، دلت چی می‌خواد؟ 💜`,
+  (name: string) => `بفرما ${name} جان، چه خبر؟ ✨`,
+  (name: string) => `${name} جان، امروز چی بسازیم؟ 💫`,
+  (name: string) => `در خدمتم ${name} جان 💕`,
+];
 
 function mainMenuText(name: string): string {
-  return `${name} جان، دلت چی می‌خواد؟ 💜`;
+  return MENU_GREETINGS[Math.floor(Math.random() * MENU_GREETINGS.length)](name);
 }
 
 function mainMenuKeyboard(): InlineKeyboard {
@@ -498,9 +508,8 @@ async function sendStats(ctx: Context, env: Env): Promise<void> {
     `😊 ${toPersianDigits(stats.moodCount)} بار حال‌وهوا ثبت شده`,
     `📝 ${toPersianDigits(stats.noteCount)} نکته‌ی کوچیک ثبت شده`,
     `💰 ${toPersianDigits(stats.savingsTotal)} تومان توی کیف پول مشترک`,
-    `🎮 ${toPersianDigits(stats.promptsUsedCount)} سوال/چالش بازی شده`,
+    `🎮 ${toPersianDigits(stats.promptsUsedCount)} سوال بازی شده`,
     `❌⭕ ${toPersianDigits(stats.tttGamesPlayed)} دوز برده شده`,
-    `📆 ${toPersianDigits(stats.dailyChallengesCompleted)} چالش روزانه انجام شده (استریک فعلی: ${toPersianDigits(stats.dailyChallengeStreak)} روز)`,
   ];
   if (daysTogether !== null && stats.earliestDate) {
     lines.push(`💕 ${toPersianDigits(daysTogether)} روزه که این خاطرات رو با هم می‌سازید (از ${formatJalali(stats.earliestDate)})`);
@@ -898,33 +907,6 @@ function renderHangmanKeyboard(word: string, guessed: string): InlineKeyboard {
   return kb;
 }
 
-// ---------- daily couple challenge ----------
-
-async function sendDailyChallengeStatus(ctx: Context, env: Env): Promise<void> {
-  const today = toISODate(todayUTC());
-  const challenge = await db.getDailyChallenge(env.DB, today);
-  const streak = await db.getDailyChallengeStreak(env.DB);
-
-  if (!challenge) {
-    await ctx.reply(
-      `هنوز چالش امروز پست نشده (هر روز صبح خودکار می‌فرستمش).\n🔥 استریک فعلی: ${toPersianDigits(streak.current_streak)} روز`,
-      { reply_markup: mainMenuKeyboard() }
-    );
-    return;
-  }
-
-  const keyboard = new InlineKeyboard();
-  if (!challenge.completed) keyboard.text("✅ انجامش دادیم", "daily:done").row();
-  keyboard.text("📜 تاریخچه", "daily:history");
-
-  await ctx.reply(
-    `📆 چالش امروز:\n${challenge.challenge_text}\n\n` +
-      `${challenge.completed ? "✅ امروز انجام شده" : "هنوز انجام نشده"}\n` +
-      `🔥 استریک: ${toPersianDigits(streak.current_streak)} روز`,
-    { reply_markup: keyboard }
-  );
-}
-
 async function sendAiStory(ctx: Context, env: Env): Promise<void> {
   if (!isAiConfigured(env)) {
     await ctx.reply("این قابلیت هنوز فعال نشده — باید یه کلید Gemini API تنظیم بشه 🔑", {
@@ -1137,8 +1119,6 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
         .text("🎲 جرأت یا حقیقت", "menu:truth_dare")
         .row()
         .text("⚖️ این یا اون", "menu:this_or_that")
-        .text("🎯 چالش هفته", "menu:weekly_challenge")
-        .row()
         .text("🙅 هیچوقت این کارو نکردم", "menu:never_have_i_ever")
         .row()
         .text("✊ سنگ کاغذ قیچی", "menu:rps")
@@ -1156,8 +1136,11 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
         .text("🔤 زنجیره‌ی کلمات", "menu:word_chain")
         .row()
         .text("🎪 دار (حدس کلمه)", "menu:hangman")
-        .text("📆 چالش روزانه", "menu:daily_challenge")
         .row()
+        .text("💡 ایده‌ی قرار", "menu:date_idea")
+        .text("🔮 فال عشق", "menu:love_fortune")
+        .row()
+        .text("🍽 امشب چی بخوریم؟", "menu:what_to_eat")
         .text("📝 سوالات جرأت‌حقیقت من", "menu:td_manage")
         .row();
       if (active) {
@@ -1178,9 +1161,15 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       for (const id of parseAllowedIds(env)) {
         await db.setPending(env.DB, id, "answer_relay", "active", {});
       }
-    } else if (action === "weekly_challenge") {
-      const challenge = await db.pickUnusedPrompt(env.DB, "weekly_challenge", WEEKLY_CHALLENGES);
-      await broadcastToBoth(ctx.api, env, `🎯 چالش این هفته:\n\n${challenge}`);
+    } else if (action === "date_idea") {
+      const idea = await db.pickUnusedPrompt(env.DB, "date_idea", DATE_IDEAS);
+      await broadcastToBoth(ctx.api, env, `💡 ایده‌ی قرار:\n\n${idea}\n\nاگه خوشتون نیومد دوباره بزنید 😉`);
+    } else if (action === "love_fortune") {
+      const fortune = await db.pickUnusedPrompt(env.DB, "love_fortune", LOVE_FORTUNES);
+      await ctx.reply(`🔮 فال امروزِ ${name}:\n\n${fortune}`, { reply_markup: mainMenuKeyboard() });
+    } else if (action === "what_to_eat") {
+      const meal = await db.pickUnusedPrompt(env.DB, "what_to_eat", WHAT_TO_EAT);
+      await broadcastToBoth(ctx.api, env, `🍽 پیشنهاد امشب:\n\n${meal}`);
     } else if (action === "truth_dare") {
       if (!(await tryStartGame(env, "truth_dare"))) {
         await ctx.reply(await gameLockedMessage(env), { reply_markup: mainMenuKeyboard() });
@@ -1341,8 +1330,6 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
         for (const cat of categories) keyboard.text(cat, `hangman:cat:${categories.indexOf(cat)}`).row();
         await ctx.reply("کدوم دسته‌بندی؟", { reply_markup: keyboard });
       }
-    } else if (action === "daily_challenge") {
-      await sendDailyChallengeStatus(ctx, env);
     } else if (action === "savings") {
       const keyboard = new InlineKeyboard()
         .text("➕ افزودن واریزی", "savings:add")
@@ -1931,33 +1918,6 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     await db.endWordChain(env.DB);
     await db.clearActiveGame(env.DB);
     await broadcastToBoth(ctx.api, env, "🏳️ زنجیره‌ی کلمات تموم شد. هر وقت خواستید از منو دوباره شروع کنید.");
-  });
-
-  // ---------- daily couple challenge ----------
-
-  bot.callbackQuery(/^daily:done$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    const today = toISODate(todayUTC());
-    const marked = await db.markDailyChallengeCompleted(env.DB, today);
-    if (!marked) {
-      await ctx.reply("قبلاً ثبت شده بود ✅");
-      return;
-    }
-    const streak = await db.bumpDailyChallengeStreak(env.DB, today);
-    await broadcastToBoth(ctx.api, env, `🔥 چالش امروز انجام شد! استریک: ${toPersianDigits(streak)} روز پشت‌سرهم`);
-  });
-
-  bot.callbackQuery(/^daily:history$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    const history = await db.listDailyChallengeHistory(env.DB, 10);
-    if (history.length === 0) {
-      await ctx.reply("هنوز تاریخچه‌ای نیست.");
-      return;
-    }
-    const lines = history.map(
-      (h) => `${h.completed ? "✅" : "◻️"} ${formatJalali(h.challenge_date)} — ${h.challenge_text}`
-    );
-    await ctx.reply(lines.join("\n"), { reply_markup: mainMenuKeyboard() });
   });
 
   // ---------- truth or dare (turn-based) ----------

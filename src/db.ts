@@ -1,4 +1,3 @@
-import { parseISODate, toISODate } from "./dates";
 
 export interface Memory {
   id: number;
@@ -356,8 +355,6 @@ export interface Stats {
   savingsTotal: number;
   promptsUsedCount: number;
   tttGamesPlayed: number;
-  dailyChallengesCompleted: number;
-  dailyChallengeStreak: number;
   earliestDate: string | null;
 }
 
@@ -371,8 +368,6 @@ export async function getStats(db: D1Database): Promise<Stats> {
     savingsRow,
     promptsRow,
     tttRow,
-    dailyDoneRow,
-    dailyStreak,
     earliestMemory,
     earliestAnniv,
   ] = await Promise.all([
@@ -384,8 +379,6 @@ export async function getStats(db: D1Database): Promise<Stats> {
     db.prepare("SELECT COALESCE(SUM(amount), 0) AS s FROM savings_transactions").first<{ s: number }>(),
     db.prepare("SELECT COUNT(*) AS c FROM used_prompts").first<{ c: number }>(),
     db.prepare("SELECT COALESCE(SUM(wins), 0) AS s FROM ttt_scores").first<{ s: number }>(),
-    db.prepare("SELECT COUNT(*) AS c FROM daily_challenge_log WHERE completed = 1").first<{ c: number }>(),
-    getDailyChallengeStreak(db),
     db.prepare("SELECT MIN(memory_date) AS d FROM memories").first<{ d: string | null }>(),
     db.prepare("SELECT MIN(event_date) AS d FROM anniversaries").first<{ d: string | null }>(),
   ]);
@@ -402,8 +395,6 @@ export async function getStats(db: D1Database): Promise<Stats> {
     savingsTotal: savingsRow?.s ?? 0,
     promptsUsedCount: promptsRow?.c ?? 0,
     tttGamesPlayed: tttRow?.s ?? 0,
-    dailyChallengesCompleted: dailyDoneRow?.c ?? 0,
-    dailyChallengeStreak: dailyStreak.current_streak,
     earliestDate,
   };
 }
@@ -946,73 +937,6 @@ export async function updateHangmanGame(
     .prepare("UPDATE hangman_games SET guessed_letters = ?, wrong_count = ?, status = ? WHERE id = 1")
     .bind(guessedLetters, wrongCount, status)
     .run();
-}
-
-// ---------- daily couple challenge ----------
-
-export interface DailyChallengeStreak {
-  id: number;
-  current_streak: number;
-  last_completed_date: string | null;
-}
-
-export interface DailyChallengeEntry {
-  challenge_date: string;
-  challenge_text: string;
-  completed: number;
-}
-
-export async function logDailyChallenge(db: D1Database, date: string, text: string): Promise<void> {
-  await db
-    .prepare(
-      "INSERT INTO daily_challenge_log (challenge_date, challenge_text, completed) VALUES (?, ?, 0) " +
-        "ON CONFLICT(challenge_date) DO NOTHING"
-    )
-    .bind(date, text)
-    .run();
-}
-
-export async function getDailyChallenge(db: D1Database, date: string): Promise<DailyChallengeEntry | null> {
-  const row = await db
-    .prepare("SELECT * FROM daily_challenge_log WHERE challenge_date = ?")
-    .bind(date)
-    .first<DailyChallengeEntry>();
-  return row ?? null;
-}
-
-export async function markDailyChallengeCompleted(db: D1Database, date: string): Promise<boolean> {
-  const existing = await getDailyChallenge(db, date);
-  if (!existing || existing.completed) return false;
-  await db.prepare("UPDATE daily_challenge_log SET completed = 1 WHERE challenge_date = ?").bind(date).run();
-  return true;
-}
-
-export async function getDailyChallengeStreak(db: D1Database): Promise<DailyChallengeStreak> {
-  const row = await db.prepare("SELECT * FROM daily_challenge_streak WHERE id = 1").first<DailyChallengeStreak>();
-  return row ?? { id: 1, current_streak: 0, last_completed_date: null };
-}
-
-export async function bumpDailyChallengeStreak(db: D1Database, date: string): Promise<number> {
-  const current = await getDailyChallengeStreak(db);
-  const yesterday = toISODate(new Date(parseISODate(date).getTime() - 86_400_000));
-  const newStreak = current.last_completed_date === yesterday ? current.current_streak + 1 : 1;
-  await db
-    .prepare(
-      "INSERT INTO daily_challenge_streak (id, current_streak, last_completed_date) VALUES (1, ?, ?) " +
-        "ON CONFLICT(id) DO UPDATE SET current_streak = excluded.current_streak, " +
-        "last_completed_date = excluded.last_completed_date"
-    )
-    .bind(newStreak, date)
-    .run();
-  return newStreak;
-}
-
-export async function listDailyChallengeHistory(db: D1Database, limit = 10): Promise<DailyChallengeEntry[]> {
-  const res = await db
-    .prepare("SELECT * FROM daily_challenge_log ORDER BY challenge_date DESC LIMIT ?")
-    .bind(limit)
-    .all<DailyChallengeEntry>();
-  return res.results ?? [];
 }
 
 // ---------- single-active-game lock ----------

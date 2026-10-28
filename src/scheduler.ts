@@ -1,11 +1,10 @@
 import { Api } from "grammy";
 
-import { DAILY_CHALLENGES, WEEKLY_CHALLENGES } from "./content";
 import * as db from "./db";
 import { daysUntil, nextOccurrence, parseISODate, todayUTC, toISODate, yearsSince } from "./dates";
 import { type Env, parseAllowedIds } from "./env";
 import { formatMemoryCaption } from "./format";
-import { MOOD_LABELS, moodKeyboard } from "./keyboards";
+import { MOOD_LABELS } from "./keyboards";
 import { getUserName } from "./names";
 
 const REMINDER_DAYS_BEFORE = new Set([30, 14, 7, 3, 1, 0]);
@@ -135,32 +134,6 @@ async function checkLocationReminders(env: Env, api: Api, ids: number[]): Promis
   }
 }
 
-async function sendWeeklyChallenge(env: Env, api: Api, ids: number[]): Promise<void> {
-  const challenge = await db.pickUnusedPrompt(env.DB, "weekly_challenge", WEEKLY_CHALLENGES);
-  await broadcastText(api, ids, `🎯 چالش این هفته:\n\n${challenge}`);
-}
-
-async function postDailyChallenge(env: Env, api: Api, ids: number[]): Promise<void> {
-  const today = toISODate(todayUTC());
-  const existing = await db.getDailyChallenge(env.DB, today);
-  if (existing) return;
-
-  const text = await db.pickUnusedPrompt(env.DB, "daily_challenge", DAILY_CHALLENGES);
-  await db.logDailyChallenge(env.DB, today, text);
-  await broadcastText(api, ids, `📆 چالش امروز:\n\n${text}\n\nهر وقت انجامش دادید از «📆 چالش روزانه» توی منوی بازی‌ها بزنید ✅`);
-}
-
-async function sendMoodPrompt(env: Env, api: Api, ids: number[]): Promise<void> {
-  for (const id of ids) {
-    const name = getUserName(env, id);
-    try {
-      await api.sendMessage(id, `${name} جان، امروز حالت چطوره؟ 💜`, { reply_markup: moodKeyboard() });
-    } catch (err) {
-      console.error(`mood prompt failed for ${id}`, err);
-    }
-  }
-}
-
 async function sendWeeklyMoodSummary(env: Env, api: Api, ids: number[]): Promise<void> {
   const today = todayUTC();
   const weekAgo = toISODate(new Date(today.getTime() - 6 * 86_400_000));
@@ -200,12 +173,6 @@ export async function runMorningJob(env: Env): Promise<void> {
   await monthlyRecap(env, api, ids);
   await deliverDueSecretMessages(env, api);
   await checkLocationReminders(env, api, ids);
-  await postDailyChallenge(env, api, ids);
-
-  if (todayUTC().getUTCDay() === 6) {
-    // Saturday: start of the Iranian work week.
-    await sendWeeklyChallenge(env, api, ids);
-  }
 }
 
 export async function runEveningJob(env: Env): Promise<void> {
@@ -220,5 +187,4 @@ export async function runEveningJob(env: Env): Promise<void> {
     // Friday evening: wrap up the week before the weekend.
     await sendWeeklyMoodSummary(env, api, ids);
   }
-  await sendMoodPrompt(env, api, ids);
 }

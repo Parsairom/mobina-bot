@@ -2,7 +2,7 @@
 
 **English | [فارسی](README.fa.md)**
 
-A serverless Telegram bot that acts as a shared memory keeper for two people in a relationship — an archive for photos and moments, smart anniversary reminders, a daily mood tracker, and a small hub of two-player games, all running on Cloudflare's edge with no server to maintain.
+A serverless Telegram bot that acts as a shared memory keeper for two people in a relationship — an archive for photos and moments, smart anniversary reminders, a mood tracker, and a small hub of two-player games, all running on Cloudflare's edge with no server to maintain.
 
 It started as a personal project (built for my partner and me) and doubles as a demonstration of building a stateful, scheduled, multi-feature bot entirely on serverless infrastructure.
 
@@ -10,13 +10,13 @@ It started as a personal project (built for my partner and me) and doubles as a 
 
 - **Memory archive** — save photos (or text-only notes) with a location and date; edit or delete any entry later through guided inline menus
 - **Smart anniversaries** — recurring reminders at 30/14/7/3/1/0 days out, plus an on-this-day flashback for memories from previous years
-- **Daily mood tracker** — a daily check-in with a one-tap mood picker and a weekly summary
+- **Mood tracker** — a one-tap mood picker you open whenever you feel like it (the bot never nags), plus a weekly summary
 - **Secret messages** — write a note for your partner that delivers automatically on a chosen date, or sits in their inbox to open whenever they want
 - **Shared notes & savings tracker** — a running list of small things worth remembering, and a shared savings log with a goal progress bar
 - **Relationship stats & full export** — quick stats (memory count, days together, etc.) and a one-tap export of everything to a styled, offline-readable HTML album
 - **Photo tools** — a monthly collage and a first-photo-vs-latest-photo comparison
 - **AI features (optional)** — a relationship "narrator" that turns your memories into a short story, gift suggestions based on things your partner has said, and photo recognition that matches a new photo against past memories (all via the Gemini API's free tier; the bot works fully without it)
-- **Games hub** — couple's questions, truth-or-dare (two spice levels), this-or-that, daily/weekly challenges, never-have-I-ever, rock-paper-scissors, two-truths-and-a-lie, a quiz generated from your own memories, plus tic-tac-toe, connect four, battleship, blackjack, hangman, word chain, and a reaction-speed game
+- **Games hub** — couple's questions, truth-or-dare (two spice levels), this-or-that, date ideas, a love fortune, a "what should we eat tonight" picker, never-have-I-ever, rock-paper-scissors, two-truths-and-a-lie, a quiz generated from your own memories, plus tic-tac-toe, connect four, battleship, blackjack, hangman, word chain, and a reaction-speed game
 - **Persian calendar support** — every date is shown in Shamsi (Jalali), with lenient input parsing that accepts Persian/Arabic-Indic digits, multiple separators, and either date order
 - **Locked down to two people** — every request is checked against an allow-list of Telegram user IDs; if that list is ever unset, the bot fails *closed* (denies everyone) rather than opening up
 
@@ -25,7 +25,7 @@ It started as a personal project (built for my partner and me) and doubles as a 
 - **TypeScript**
 - **Cloudflare Workers** — serverless compute, no origin server
 - **Cloudflare D1** — SQLite-compatible edge database
-- **Cloudflare Cron Triggers** — scheduled jobs (reminders, mood prompts, challenges)
+- **Cloudflare Cron Triggers** — scheduled jobs (anniversary reminders, flashbacks, weekly mood recap)
 - **[grammY](https://grammy.dev)** — Telegram Bot API framework
 - **Telegram Bot API** (webhook mode, secret-token verified)
 - **Gemini API** — optional, for the AI-powered features
@@ -53,11 +53,11 @@ cf-worker/
 ├── src/
 │   ├── index.ts       # Worker entry point: fetch() webhook handler + scheduled() cron handler
 │   ├── bot.ts          # grammY bot: commands, menus, wizards, and game handlers
-│   ├── scheduler.ts     # Cron job logic: reminders, mood prompts, weekly/daily challenges
+│   ├── scheduler.ts     # Cron job logic: reminders, flashbacks, weekly mood recap
 │   ├── db.ts           # D1 query layer (all SQL lives here, fully parameterized)
 │   ├── ai.ts            # Gemini API client for the optional AI features
 │   ├── gamelogic.ts     # Pure game-engine logic (tic-tac-toe, connect four, etc.)
-│   ├── content.ts       # Static prompts/questions/challenges used by the games
+│   ├── content.ts       # Static prompts and ideas used by the games
 │   ├── dates.ts          # Date arithmetic (anniversary countdowns, etc.)
 │   ├── jalali.ts        # Gregorian ⇄ Persian (Jalali) calendar conversion
 │   ├── format.ts, keyboards.ts, names.ts, env.ts  # small focused helpers

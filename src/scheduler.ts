@@ -190,6 +190,8 @@ async function sendWeeklyMoodSummary(env: Env, api: Api, ids: number[]): Promise
 export async function runMorningJob(env: Env): Promise<void> {
   const ids = parseAllowedIds(env);
   if (ids.length === 0) return;
+  // The admin can switch the bot off; scheduled messages stop too.
+  if (!(await db.isBotEnabled(env.DB))) return;
 
   const api = new Api(env.BOT_TOKEN);
 
@@ -209,6 +211,8 @@ export async function runMorningJob(env: Env): Promise<void> {
 export async function runEveningJob(env: Env): Promise<void> {
   const ids = parseAllowedIds(env);
   if (ids.length === 0) return;
+  // The admin can switch the bot off; scheduled messages stop too.
+  if (!(await db.isBotEnabled(env.DB))) return;
 
   const api = new Api(env.BOT_TOKEN);
 

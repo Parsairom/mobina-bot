@@ -103,6 +103,7 @@ cp .dev.vars.example .dev.vars
 | `BOT_TOKEN` | Yes | Telegram bot token from @BotFather |
 | `TELEGRAM_WEBHOOK_SECRET` | Yes | Random string you generate; verifies incoming webhook requests |
 | `ALLOWED_USER_IDS` | Yes | Comma-separated Telegram user IDs allowed to use the bot (get yours from [@userinfobot](https://t.me/userinfobot)). **Bot denies everyone if this is unset.** |
+| `ADMIN_USER_ID` | No | Telegram user ID allowed to switch the bot on/off from a button in the chat. Defaults to the first ID in `ALLOWED_USER_IDS` |
 | `USER_NAMES` | No | JSON map of user ID → display name, e.g. `{"111111111":"Alice"}` |
 | `GEMINI_API_KEY` | No | Enables the AI-powered features; everything else works without it |
 

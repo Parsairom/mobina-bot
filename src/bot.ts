@@ -15,7 +15,7 @@ import {
 } from "./content";
 import * as db from "./db";
 import { daysUntil, parseISODate, todayUTC, toISODate, yearsSince } from "./dates";
-import { type Env, parseAllowedIds } from "./env";
+import { type Env, getAdminId, parseAllowedIds } from "./env";
 import { formatMemoryCaption } from "./format";
 import {
   BATTLESHIP_SIZE,
@@ -97,6 +97,8 @@ const BTN_EXPORT = "📤 دانلود خاطرات";
 const BTN_MEDIA = "🖼 کلاژ و مقایسه";
 const BTN_AI_STORY = "📖 داستان رابطه";
 const BTN_AI_GIFT = "🎁 پیشنهاد هدیه";
+// Only ever shown to the admin (see getAdminId in env.ts).
+const BTN_BOT_POWER = "⚙️ روشن/خاموش کردن بات";
 
 const REPLY_BUTTON_ACTIONS: Record<string, string> = {
   [BTN_ADD_MEMORY]: "add_memory",
@@ -116,10 +118,11 @@ const REPLY_BUTTON_ACTIONS: Record<string, string> = {
   [BTN_MEDIA]: "photo_media",
   [BTN_AI_STORY]: "ai_story",
   [BTN_AI_GIFT]: "ai_gift",
+  [BTN_BOT_POWER]: "bot_power",
 };
 
-function mainReplyKeyboard(): Keyboard {
-  return new Keyboard()
+function mainReplyKeyboard(isAdmin = false): Keyboard {
+  const keyboard = new Keyboard()
     .text(BTN_ADD_MEMORY)
     .text(BTN_ADD_ANNIVERSARY)
     .row()
@@ -145,8 +148,14 @@ function mainReplyKeyboard(): Keyboard {
     .text(BTN_MEDIA)
     .row()
     .text(BTN_AI_STORY)
-    .text(BTN_AI_GIFT)
-    .resized();
+    .text(BTN_AI_GIFT);
+  if (isAdmin) keyboard.row().text(BTN_BOT_POWER);
+  return keyboard.resized();
+}
+
+// What the admin sees while the bot is switched off: just the way back on.
+function botPowerKeyboard(): Keyboard {
+  return new Keyboard().text(BTN_BOT_POWER).resized();
 }
 
 function otherUserId(env: Env, fromId: number): number | null {
@@ -1033,6 +1042,30 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
     await next();
   });
 
+  // Admin kill switch: while the bot is off, everyone (including the admin)
+  // gets a "bot is inactive" reply, except the admin's own way to turn it back on.
+  bot.use(async (ctx, next) => {
+    if (await db.isBotEnabled(env.DB)) {
+      await next();
+      return;
+    }
+
+    const isAdmin = ctx.from?.id === getAdminId(env);
+    const callbackData = ctx.callbackQuery?.data ?? "";
+    const text = ctx.message?.text?.trim() ?? "";
+    if (isAdmin && (text === BTN_BOT_POWER || callbackData.startsWith("botpower:"))) {
+      await next();
+      return;
+    }
+
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+    if (isAdmin) {
+      await ctx.reply("بات الان غیرفعاله 💤", { reply_markup: botPowerKeyboard() });
+    } else {
+      await ctx.reply("بات فعلاً غیرفعاله 💤");
+    }
+  });
+
   bot.use(async (ctx, next) => {
     if (ctx.from) {
       const today = new Date().toISOString().slice(0, 10);
@@ -1044,7 +1077,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
   bot.command("start", async (ctx) => {
     if (!ctx.from) return;
     await ctx.reply(HELP_TEXT);
-    await ctx.reply(mainMenuText(getUserName(env, ctx.from.id)), { reply_markup: mainReplyKeyboard() });
+    await ctx.reply(mainMenuText(getUserName(env, ctx.from.id)), { reply_markup: mainReplyKeyboard(ctx.from.id === getAdminId(env)) });
   });
 
   bot.command("help", async (ctx) => {
@@ -1054,7 +1087,7 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
   bot.command("menu", async (ctx) => {
     if (!ctx.from) return;
     await db.clearPending(env.DB, ctx.from.id);
-    await ctx.reply(mainMenuText(getUserName(env, ctx.from.id)), { reply_markup: mainReplyKeyboard() });
+    await ctx.reply(mainMenuText(getUserName(env, ctx.from.id)), { reply_markup: mainReplyKeyboard(ctx.from.id === getAdminId(env)) });
   });
 
   // ---------- main menu navigation ----------
@@ -1366,8 +1399,33 @@ export function createBot(env: Env, cfCtx: ExecutionContext): Bot {
       await sendAiStory(ctx, env);
     } else if (action === "ai_gift") {
       await sendAiGift(ctx, env);
+    } else if (action === "bot_power") {
+      if (ctx.from!.id !== getAdminId(env)) return;
+      const enabled = await db.isBotEnabled(env.DB);
+      const keyboard = new InlineKeyboard().text(
+        enabled ? "⛔ غیرفعال کن" : "✅ فعال کن",
+        enabled ? "botpower:off" : "botpower:on"
+      );
+      await ctx.reply(enabled ? "بات الان فعاله ✅" : "بات الان غیرفعاله 💤", { reply_markup: keyboard });
     }
   }
+
+  bot.callbackQuery(/^botpower:(on|off)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (ctx.from.id !== getAdminId(env)) return;
+
+    const enable = ctx.match[1] === "on";
+    await db.setBotEnabled(env.DB, enable);
+    await ctx.editMessageReplyMarkup().catch(() => {});
+    if (enable) {
+      await ctx.reply("بات دوباره فعال شد ✅", { reply_markup: mainReplyKeyboard(true) });
+    } else {
+      await ctx.reply(
+        "بات غیرفعال شد 💤 تا وقتی دوباره فعالش نکنی به هیچ‌کس جواب نمی‌ده و پیام خودکار هم نمی‌فرسته.",
+        { reply_markup: botPowerKeyboard() }
+      );
+    }
+  });
 
   bot.callbackQuery(/^menu:(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();

@@ -1176,3 +1176,22 @@ export async function getBothActiveDates(db: D1Database, sinceDate: string): Pro
     .all<{ activity_date: string }>();
   return (res.results ?? []).map((r) => r.activity_date);
 }
+
+// ---------- bot on/off switch (admin only) ----------
+
+export async function isBotEnabled(db: D1Database): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT value FROM bot_settings WHERE key = 'bot_enabled'")
+    .first<{ value: string }>();
+  return row?.value !== "0";
+}
+
+export async function setBotEnabled(db: D1Database, enabled: boolean): Promise<void> {
+  await db
+    .prepare(
+      "INSERT INTO bot_settings (key, value) VALUES ('bot_enabled', ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+    .bind(enabled ? "1" : "0")
+    .run();
+}
